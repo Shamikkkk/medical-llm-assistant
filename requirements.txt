@@ -1,0 +1,15 @@
+streamlit
+streamlit-component-theme-changer
+python-dotenv
+langchain
+langchain-core
+langchain-community
+chromadb
+sentence-transformers
+requests
+langchain-nvidia-ai-endpoints
+transformers
+torch
+accelerate
+sentencepiece
+tiktoken
