@@ -9,6 +9,7 @@ import requests
 from langchain_core.documents import Document
 
 from src.logging_utils import log_llm_usage
+from src.papers.doi import build_doi_url, extract_doi, resolve_doi_url
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 REQUEST_TIMEOUT_SECONDS = 20
@@ -71,6 +72,7 @@ def pubmed_efetch(pmids: List[str]) -> List[Dict[str, Any]]:
         )
         year = _extract_year(article)
         authors = _extract_authors(article)
+        doi, pmcid, fulltext_url = _extract_identifier_info(article)
 
         records.append(
             {
@@ -80,6 +82,9 @@ def pubmed_efetch(pmids: List[str]) -> List[Dict[str, Any]]:
                 "journal": journal,
                 "year": year,
                 "authors": authors,
+                "doi": doi,
+                "pmcid": pmcid,
+                "fulltext_url": fulltext_url,
             }
         )
     return records
@@ -99,6 +104,9 @@ def to_documents(records: List[Dict[str, Any]]) -> List[Document]:
             "journal": record.get("journal", ""),
             "year": record.get("year", ""),
             "authors": record.get("authors", []),
+            "doi": record.get("doi", ""),
+            "pmcid": record.get("pmcid", ""),
+            "fulltext_url": record.get("fulltext_url", ""),
         }
         documents.append(Document(page_content=page_content, metadata=metadata))
     return documents
@@ -210,6 +218,44 @@ def _extract_authors(article: ET.Element) -> List[str]:
         if name:
             authors.append(name)
     return authors
+
+
+def _extract_identifier_info(article: ET.Element) -> tuple[str, str, str]:
+    doi = ""
+    pmcid = ""
+    for node in article.findall(".//PubmedData/ArticleIdList/ArticleId"):
+        id_type = str(node.attrib.get("IdType", "")).strip().lower()
+        value = _get_text_from(node) or ""
+        if id_type == "doi" and not doi:
+            doi = extract_doi(value)
+        elif id_type == "pmc" and not pmcid:
+            pmcid = _normalize_pmcid(value)
+
+    if not doi:
+        for node in article.findall(".//Article/ELocationID"):
+            id_type = str(node.attrib.get("EIdType", "")).strip().lower()
+            if id_type != "doi":
+                continue
+            doi = extract_doi(_get_text_from(node) or "")
+            if doi:
+                break
+
+    fulltext_url = ""
+    if pmcid:
+        fulltext_url = f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
+    elif doi:
+        fulltext_url = resolve_doi_url(doi) or build_doi_url(doi)
+    return doi, pmcid, fulltext_url
+
+
+def _normalize_pmcid(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.upper().startswith("PMC"):
+        return text.upper()
+    digits = "".join(ch for ch in text if ch.isdigit())
+    return f"PMC{digits}" if digits else ""
 
 
 def _contains_cardiovascular_term(text: str) -> bool:

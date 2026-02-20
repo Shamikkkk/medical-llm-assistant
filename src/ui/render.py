@@ -17,7 +17,7 @@ def apply_app_styles() -> None:
     .main .block-container {
         max-width: 1040px;
         padding-top: 1.2rem;
-        padding-bottom: 2rem;
+        padding-bottom: 8rem;
     }
     .cardio-header-row {
         margin-bottom: 0.35rem;
@@ -57,6 +57,14 @@ def apply_app_styles() -> None:
         align-items: flex-start;
         min-height: 3rem;
         margin-top: 0.15rem;
+    }
+    div[data-testid="stChatInput"] {
+        position: sticky;
+        bottom: 0;
+        z-index: 100;
+        padding-top: 0.4rem;
+        padding-bottom: 0.4rem;
+        backdrop-filter: blur(3px);
     }
 </style>
         """,
@@ -114,9 +122,9 @@ def render_sidebar(
             step=1,
         )
 
-        if st.button("New Chat", use_container_width=True):
+        if _button_stretch("New Chat"):
             action["new_chat"] = True
-        if st.button("Clear active chat", use_container_width=True):
+        if _button_stretch("Clear active chat"):
             action["clear_chat"] = True
 
         st.markdown("### Recent Chats", unsafe_allow_html=False)
@@ -136,7 +144,7 @@ def render_sidebar(
             created_at = _format_timestamp(str(chat.get("created_at", "")))
             prefix = "* " if chat_id == active_chat_id else ""
             label = f"{prefix}{title} ({created_at})" if created_at else f"{prefix}{title}"
-            if st.button(label, key=f"chat_switch_{chat_id}", use_container_width=True):
+            if _button_stretch(label, key=f"chat_switch_{chat_id}"):
                 action["switch_chat_id"] = chat_id
 
     return action
@@ -153,6 +161,12 @@ def render_message(message: Mapping[str, Any], *, top_n: int) -> None:
     content = strip_reframe_block(str(message.get("content", "") or ""))
     if role == "assistant":
         st.markdown(beautify_text(content), unsafe_allow_html=False)
+        paper_notice = str(message.get("paper_focus_notice", "") or "").strip()
+        if paper_notice:
+            st.info(paper_notice)
+        rewritten_query = str(message.get("rewritten_query", "") or "").strip()
+        if rewritten_query:
+            st.caption(f"Follow-up rewrite: {rewritten_query}")
         warning = str(message.get("validation_warning", "") or "").strip()
         issues = message.get("validation_issues", []) or []
         if warning:
@@ -192,6 +206,8 @@ def render_source_item(source: SourceItem) -> None:
     pmid_display = pmid if pmid else "N/A"
     journal = str(source.get("journal", "") or "").strip()
     year = str(source.get("year", "") or "").strip()
+    doi = str(source.get("doi", "") or "").strip()
+    fulltext_url = str(source.get("fulltext_url", "") or "").strip()
 
     meta = ""
     if journal and year:
@@ -204,8 +220,12 @@ def render_source_item(source: SourceItem) -> None:
     markdown_lines = [f"**{rank}) {title}**", f"PMID: `{pmid_display}`"]
     if meta:
         markdown_lines.append(meta)
+    if doi:
+        markdown_lines.append(f"DOI: `{doi}`")
     if pmid:
         markdown_lines.append(f"[PubMed]({pubmed_url(pmid)})")
+    if fulltext_url:
+        markdown_lines.append(f"[Full Text Link]({fulltext_url})")
     st.markdown("\n\n".join(markdown_lines), unsafe_allow_html=False)
 
 
@@ -227,6 +247,9 @@ def _rank_sources(items: list[dict], limit: int) -> list[SourceItem]:
                 "title": str(item.get("title", "") or ""),
                 "journal": str(item.get("journal", "") or ""),
                 "year": str(item.get("year", "") or ""),
+                "doi": str(item.get("doi", "") or ""),
+                "pmcid": str(item.get("pmcid", "") or ""),
+                "fulltext_url": str(item.get("fulltext_url", "") or ""),
             }
         )
         if len(ranked) >= limit:
@@ -270,3 +293,10 @@ def _render_theme_toggle() -> None:
             st_theme_changer()
     except Exception:
         st.caption("Theme: use menu -> Settings -> Theme")
+
+
+def _button_stretch(label: str, key: str | None = None) -> bool:
+    try:
+        return st.button(label, key=key, width="stretch")
+    except TypeError:
+        return st.button(label, key=key, use_container_width=True)

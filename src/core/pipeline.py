@@ -467,6 +467,9 @@ def _build_docs_preview(records: List[Dict[str, Any]], top_n: int) -> List[Sourc
                 "title": str(record.get("title", "") or ""),
                 "year": str(record.get("year", "") or ""),
                 "journal": str(record.get("journal", "") or ""),
+                "doi": str(record.get("doi", "") or ""),
+                "pmcid": str(record.get("pmcid", "") or ""),
+                "fulltext_url": str(record.get("fulltext_url", "") or ""),
             }
         )
         if len(items) >= top_n:
@@ -504,6 +507,9 @@ def _collect_sources_from_docs(docs: list, top_n: int) -> List[SourceItem]:
                 "title": str(meta.get("title", "") or ""),
                 "journal": str(meta.get("journal", "") or ""),
                 "year": str(meta.get("year", "") or ""),
+                "doi": str(meta.get("doi", "") or ""),
+                "pmcid": str(meta.get("pmcid", "") or ""),
+                "fulltext_url": str(meta.get("fulltext_url", "") or ""),
             }
         )
         seen_pmids.add(pmid)
