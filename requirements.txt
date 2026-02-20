@@ -13,3 +13,7 @@ torch
 accelerate
 sentencepiece
 tiktoken
+langgraph
+ragas
+datasets
+langchain-openai

@@ -25,6 +25,11 @@ class AppConfig:
     validator_max_length: int
     validator_top_n_chunks: int
     validator_top_k_sentences: int
+    agent_mode: bool
+    agent_use_langgraph: bool
+    eval_mode: bool
+    eval_sample_rate: float
+    eval_store_path: Path
 
 
 def load_config() -> AppConfig:
@@ -55,6 +60,13 @@ def load_config() -> AppConfig:
     validator_max_length = _parse_int(os.getenv("VALIDATOR_MAX_LENGTH"), default=512)
     validator_top_n_chunks = _parse_int(os.getenv("VALIDATOR_TOP_N_CHUNKS"), default=4)
     validator_top_k_sentences = _parse_int(os.getenv("VALIDATOR_TOP_K_SENTENCES"), default=2)
+    agent_mode = _parse_bool(os.getenv("AGENT_MODE", "false"))
+    agent_use_langgraph = _parse_bool(os.getenv("AGENT_USE_LANGGRAPH", "true"))
+    eval_mode = _parse_bool(os.getenv("EVAL_MODE", "false"))
+    eval_sample_rate = _parse_float(os.getenv("EVAL_SAMPLE_RATE"), default=0.25)
+    eval_store_path = Path(
+        os.getenv("EVAL_STORE_PATH", "./data/eval/eval_results.jsonl")
+    ).expanduser().absolute()
 
     return AppConfig(
         app_title=app_title,
@@ -73,6 +85,11 @@ def load_config() -> AppConfig:
         validator_max_length=max(128, min(1024, validator_max_length)),
         validator_top_n_chunks=max(1, min(10, validator_top_n_chunks)),
         validator_top_k_sentences=max(1, min(5, validator_top_k_sentences)),
+        agent_mode=agent_mode,
+        agent_use_langgraph=agent_use_langgraph,
+        eval_mode=eval_mode,
+        eval_sample_rate=max(0.0, min(1.0, eval_sample_rate)),
+        eval_store_path=eval_store_path,
     )
 
 

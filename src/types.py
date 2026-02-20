@@ -25,6 +25,8 @@ class PipelineResponse(TypedDict, total=False):
     reframed_query: str
     intent_label: str
     intent_confidence: float
+    reframe_note: str
+    retrieved_contexts: list[dict[str, str]]
     validation_warning: str
     validation_issues: list[str]
     validation_confidence: str

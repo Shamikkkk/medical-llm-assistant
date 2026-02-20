@@ -71,6 +71,7 @@ def invoke_chat(query: str, session_id: str, top_n: int = 10) -> PipelineRespons
             "answer": smalltalk_reply(query, llm=llm),
             "query": query,
             "sources": [],
+            "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
         }
@@ -82,6 +83,7 @@ def invoke_chat(query: str, session_id: str, top_n: int = 10) -> PipelineRespons
             "message": scope.user_message,
             "query": query,
             "scope_label": scope.label,
+            "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
         }
@@ -107,6 +109,7 @@ def invoke_chat(query: str, session_id: str, top_n: int = 10) -> PipelineRespons
             "reframed_query": scope.reframed_query or "",
             "query": query,
             "sources": [],
+            "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
         }
@@ -129,6 +132,7 @@ def invoke_chat(query: str, session_id: str, top_n: int = 10) -> PipelineRespons
         retrieval_query=context["retrieval_query"],
     )
     sources = _collect_sources_from_docs(retrieved_docs, top_n=safe_top_n)
+    retrieved_contexts = _docs_to_eval_contexts(retrieved_docs, top_n=safe_top_n)
     validation_payload = _run_optional_validation(
         config=config,
         user_query=query,
@@ -147,9 +151,11 @@ def invoke_chat(query: str, session_id: str, top_n: int = 10) -> PipelineRespons
         "scope_label": scope.label,
         "scope_message": scope.user_message,
         "reframed_query": scope.reframed_query or "",
+        "reframe_note": context.get("reframe_note", ""),
         "query": query,
         "intent_label": intent_label,
         "intent_confidence": intent_confidence,
+        "retrieved_contexts": retrieved_contexts,
     }
     payload.update(validation_payload)
     return payload
@@ -170,6 +176,7 @@ def stream_chat(query: str, session_id: str, top_n: int = 10):
             "answer": reply,
             "query": query,
             "sources": [],
+            "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
         }
@@ -185,6 +192,7 @@ def stream_chat(query: str, session_id: str, top_n: int = 10):
             "reframed_query": scope.reframed_query or "",
             "query": query,
             "sources": [],
+            "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
         }
@@ -212,6 +220,7 @@ def stream_chat(query: str, session_id: str, top_n: int = 10):
             "reframed_query": scope.reframed_query or "",
             "query": query,
             "sources": [],
+            "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
         }
@@ -241,6 +250,7 @@ def stream_chat(query: str, session_id: str, top_n: int = 10):
         retrieval_query=context["retrieval_query"],
     )
     sources = _collect_sources_from_docs(retrieved_docs, top_n=safe_top_n)
+    retrieved_contexts = _docs_to_eval_contexts(retrieved_docs, top_n=safe_top_n)
     validation_payload = _run_optional_validation(
         config=config,
         user_query=query,
@@ -258,9 +268,11 @@ def stream_chat(query: str, session_id: str, top_n: int = 10):
         "scope_label": scope.label,
         "scope_message": scope.user_message,
         "reframed_query": scope.reframed_query or "",
+        "reframe_note": context.get("reframe_note", ""),
         "query": query,
         "intent_label": intent_label,
         "intent_confidence": intent_confidence,
+        "retrieved_contexts": retrieved_contexts,
     }
     payload.update(validation_payload)
     return payload
@@ -498,6 +510,30 @@ def _collect_sources_from_docs(docs: list, top_n: int) -> List[SourceItem]:
         if len(sources) >= top_n:
             break
     return sources
+
+
+def _docs_to_eval_contexts(docs: list, top_n: int) -> list[dict[str, str]]:
+    contexts: list[dict[str, str]] = []
+    seen_pmids: set[str] = set()
+    for doc in docs:
+        metadata = getattr(doc, "metadata", {}) or {}
+        pmid = str(metadata.get("pmid", "") or "").strip()
+        if pmid and pmid in seen_pmids:
+            continue
+        if pmid:
+            seen_pmids.add(pmid)
+        contexts.append(
+            {
+                "pmid": pmid,
+                "title": str(metadata.get("title", "") or ""),
+                "journal": str(metadata.get("journal", "") or ""),
+                "year": str(metadata.get("year", "") or ""),
+                "context": str(getattr(doc, "page_content", "") or "")[:4000],
+            }
+        )
+        if len(contexts) >= top_n:
+            break
+    return contexts
 
 
 def _build_retriever(abstract_store, top_n: int, use_reranker: bool, log_pipeline: bool = False):

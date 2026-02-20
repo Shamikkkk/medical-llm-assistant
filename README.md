@@ -86,11 +86,75 @@ streamlit run app.py
 - The app uses PubMed E-utilities and retrieves abstracts in real time.
 - Answers are grounded only in retrieved abstracts and include PMID citations.
 - If the NVIDIA key is missing, the app still retrieves papers but skips LLM-based answering.
+- In `AGENT_MODE=true`, the app runs a LangGraph-backed tool orchestrator.
+- In `EVAL_MODE=true`, the app runs online RAG evaluation sampling and stores results locally.
 
 ---
 
 ## Project structure
 
 - `app.py`: Streamlit entry point
-- `src/`: application modules (config, pipeline, PubMed, storage, UI)
-- `data/`: local persistence (Chroma vector stores)
+- `src/core/`: baseline RAG pipeline and chain logic
+- `src/agent/`: agent orchestrator and tool wrappers
+- `src/integrations/`: PubMed, Chroma, NVIDIA integrations
+- `src/ui/`: rendering/formatting helpers
+- `eval/`: evaluation runner, metrics, store, and dashboard helpers
+- `data/`: local persistence (Chroma vector stores)
+
+---
+
+## Agent mode (optional)
+
+Enable in `.env`:
+
+```bash
+AGENT_MODE=true
+AGENT_USE_LANGGRAPH=true
+```
+
+Behavior:
+- `AGENT_MODE=false` (default): existing baseline pipeline runs unchanged.
+- `AGENT_MODE=true`: an agent orchestrator routes tool calls for guardrails, query refinement, PubMed retrieval, retrieval, answer synthesis, and citation formatting.
+
+---
+
+## Evaluation mode (optional)
+
+Enable in `.env`:
+
+```bash
+EVAL_MODE=true
+EVAL_SAMPLE_RATE=0.25
+EVAL_STORE_PATH=./data/eval/eval_results.jsonl
+OPENAI_API_KEY=<NVIDIA_API_KEY_FOR_OPENAI_COMPAT>
+OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+# optional:
+RAGAS_JUDGE_MODEL=meta/llama-3.1-8b-instruct
+```
+
+Behavior:
+- Runs online evaluation on sampled user turns.
+- Shows an **Evaluation Dashboard** tab in Streamlit.
+- Persists per-query metrics to JSONL.
+- RAGAS judge uses NVIDIA's OpenAI-compatible endpoint, so no OpenAI key is required.
+- If `OPENAI_API_KEY`/`OPENAI_BASE_URL` are missing or RAGAS errors, evaluation falls back to heuristic metrics.
+
+### Offline evaluation
+
+Use the template dataset:
+
+```bash
+python -m eval.run_offline --dataset data/eval_set.json --out data/eval/eval_results.jsonl
+```
+
+Run in agent mode:
+
+```bash
+python -m eval.run_offline --dataset data/eval_set.json --out data/eval/eval_results.jsonl --agent-mode
+```
+
+### Smoke test
+
+```bash
+python scripts/smoke_agent_eval.py
+```

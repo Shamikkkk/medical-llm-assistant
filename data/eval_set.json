@@ -1,0 +1,42 @@
+[
+  {
+    "query": "DOACs vs warfarin for stroke prevention in atrial fibrillation",
+    "expected_pmids": []
+  },
+  {
+    "query": "Do SGLT2 inhibitors reduce heart failure hospitalizations?",
+    "expected_pmids": []
+  },
+  {
+    "query": "Beta-blockers in HFrEF mortality outcomes",
+    "expected_pmids": []
+  },
+  {
+    "query": "Statins for secondary prevention after myocardial infarction",
+    "expected_pmids": []
+  },
+  {
+    "query": "How does COPD affect cardiovascular risk and heart failure outcomes?",
+    "expected_pmids": []
+  },
+  {
+    "query": "Pulmonary hypertension in left-sided heart disease: prognosis and management evidence",
+    "expected_pmids": []
+  },
+  {
+    "query": "Aspirin vs dual antiplatelet therapy after PCI in high bleeding risk patients",
+    "expected_pmids": []
+  },
+  {
+    "query": "Role of cardiac rehabilitation after acute coronary syndrome",
+    "expected_pmids": []
+  },
+  {
+    "query": "Catheter ablation versus antiarrhythmic drugs for atrial fibrillation recurrence",
+    "expected_pmids": []
+  },
+  {
+    "query": "What are the cardiovascular implications of obstructive sleep apnea?",
+    "expected_pmids": []
+  }
+]
