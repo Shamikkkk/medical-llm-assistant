@@ -9,7 +9,7 @@ import requests
 from langchain_core.documents import Document
 
 from src.logging_utils import log_llm_usage
-from src.papers.doi import build_doi_url, extract_doi, resolve_doi_url
+from src.papers.doi import build_doi_url, extract_doi
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 REQUEST_TIMEOUT_SECONDS = 20
@@ -244,7 +244,7 @@ def _extract_identifier_info(article: ET.Element) -> tuple[str, str, str]:
     if pmcid:
         fulltext_url = f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
     elif doi:
-        fulltext_url = resolve_doi_url(doi) or build_doi_url(doi)
+        fulltext_url = build_doi_url(doi)
     return doi, pmcid, fulltext_url
 
 

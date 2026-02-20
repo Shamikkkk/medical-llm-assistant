@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Mapping
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.core.config import AppConfig
 from src.types import SourceItem
-from src.ui.formatters import beautify_text, pubmed_url, strip_reframe_block
+from src.ui.formatters import beautify_text, doi_url, pubmed_url, strip_reframe_block
 
 
 def apply_app_styles() -> None:
@@ -150,20 +152,28 @@ def render_sidebar(
     return action
 
 
-def render_chat(messages: list[dict], *, top_n: int) -> None:
-    for message in messages:
+def render_chat(messages: list[dict], *, top_n: int, show_papers: bool) -> None:
+    for idx, message in enumerate(messages):
         with st.chat_message(message["role"]):
-            render_message(message, top_n=top_n)
+            render_message(
+                message,
+                top_n=top_n,
+                show_papers=show_papers,
+                message_key=f"assistant_{idx}",
+            )
 
 
-def render_message(message: Mapping[str, Any], *, top_n: int) -> None:
+def render_message(
+    message: Mapping[str, Any],
+    *,
+    top_n: int,
+    show_papers: bool = True,
+    message_key: str = "",
+) -> None:
     role = message.get("role")
     content = strip_reframe_block(str(message.get("content", "") or ""))
     if role == "assistant":
         st.markdown(beautify_text(content), unsafe_allow_html=False)
-        paper_notice = str(message.get("paper_focus_notice", "") or "").strip()
-        if paper_notice:
-            st.info(paper_notice)
         rewritten_query = str(message.get("rewritten_query", "") or "").strip()
         if rewritten_query:
             st.caption(f"Follow-up rewrite: {rewritten_query}")
@@ -177,10 +187,15 @@ def render_message(message: Mapping[str, Any], *, top_n: int) -> None:
                     st.markdown(f"- {issue}", unsafe_allow_html=False)
 
         status = str(message.get("status", "answered"))
-        if status == "answered":
+        if should_render_sources(status=status, show_papers=show_papers):
             render_ranked_sources(message.get("sources", []) or [], top_n=top_n)
+        _render_copy_button(content, key=f"copy_{message_key}")
         return
     st.markdown(content, unsafe_allow_html=False)
+
+
+def should_render_sources(*, status: str, show_papers: bool) -> bool:
+    return bool(show_papers and str(status) == "answered")
 
 
 def render_ranked_sources(sources: list[dict], top_n: int) -> None:
@@ -207,7 +222,6 @@ def render_source_item(source: SourceItem) -> None:
     journal = str(source.get("journal", "") or "").strip()
     year = str(source.get("year", "") or "").strip()
     doi = str(source.get("doi", "") or "").strip()
-    fulltext_url = str(source.get("fulltext_url", "") or "").strip()
 
     meta = ""
     if journal and year:
@@ -221,11 +235,9 @@ def render_source_item(source: SourceItem) -> None:
     if meta:
         markdown_lines.append(meta)
     if doi:
-        markdown_lines.append(f"DOI: `{doi}`")
+        markdown_lines.append(f"[DOI]({doi_url(doi)})")
     if pmid:
         markdown_lines.append(f"[PubMed]({pubmed_url(pmid)})")
-    if fulltext_url:
-        markdown_lines.append(f"[Full Text Link]({fulltext_url})")
     st.markdown("\n\n".join(markdown_lines), unsafe_allow_html=False)
 
 
@@ -249,7 +261,6 @@ def _rank_sources(items: list[dict], limit: int) -> list[SourceItem]:
                 "year": str(item.get("year", "") or ""),
                 "doi": str(item.get("doi", "") or ""),
                 "pmcid": str(item.get("pmcid", "") or ""),
-                "fulltext_url": str(item.get("fulltext_url", "") or ""),
             }
         )
         if len(ranked) >= limit:
@@ -300,3 +311,27 @@ def _button_stretch(label: str, key: str | None = None) -> bool:
         return st.button(label, key=key, width="stretch")
     except TypeError:
         return st.button(label, key=key, use_container_width=True)
+
+
+def _render_copy_button(text: str, *, key: str) -> None:
+    if not key:
+        key = f"copy_{abs(hash(text))}"
+    payload = json.dumps(str(text or ""))
+    components.html(
+        f"""
+        <div style="display:flex;justify-content:flex-end;">
+            <button id="{key}" style="font-size:0.8rem;padding:0.25rem 0.5rem;border-radius:6px;border:1px solid #aaa;cursor:pointer;"
+                onclick='(async () => {{
+                    const value = {payload};
+                    try {{
+                        await navigator.clipboard.writeText(value);
+                        this.innerText = "Copied";
+                    }} catch (e) {{
+                        this.innerText = "Copy failed";
+                    }}
+                }})()'
+            >Copy response</button>
+        </div>
+        """,
+        height=40,
+    )

@@ -50,3 +50,10 @@ def beautify_text(text: str) -> str:
 def pubmed_url(pmid: str) -> str:
     normalized = str(pmid or "").strip()
     return f"https://pubmed.ncbi.nlm.nih.gov/{normalized}/"
+
+
+def doi_url(doi: str) -> str:
+    normalized = str(doi or "").strip()
+    if not normalized:
+        return ""
+    return f"https://doi.org/{normalized}"

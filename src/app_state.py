@@ -119,27 +119,12 @@ def get_follow_up_mode() -> bool:
     return bool(get_active_context_state().get("follow_up_mode", False))
 
 
-def get_selected_paper() -> dict | None:
-    value = get_active_context_state().get("selected_paper")
-    if isinstance(value, dict):
-        return dict(value)
-    return None
+def set_show_papers(enabled: bool) -> None:
+    update_active_context_state(show_papers=bool(enabled))
 
 
-def set_selected_paper(paper: dict | None) -> None:
-    if paper and isinstance(paper, dict):
-        payload = {
-            "pmid": str(paper.get("pmid", "")).strip(),
-            "title": str(paper.get("title", "")).strip(),
-            "journal": str(paper.get("journal", "")).strip(),
-            "year": str(paper.get("year", "")).strip(),
-            "doi": str(paper.get("doi", "")).strip(),
-            "pmcid": str(paper.get("pmcid", "")).strip(),
-            "fulltext_url": str(paper.get("fulltext_url", "")).strip(),
-        }
-        update_active_context_state(selected_paper=payload)
-        return
-    update_active_context_state(selected_paper=None)
+def get_show_papers() -> bool:
+    return bool(get_active_context_state().get("show_papers", False))
 
 
 def _utc_now_iso() -> str:
@@ -212,8 +197,8 @@ def _sanitize_top_n(value: Any) -> int:
 
 def _default_context_state() -> dict:
     return {
-        "follow_up_mode": False,
-        "selected_paper": None,
+        "follow_up_mode": True,
+        "show_papers": False,
         "last_topic_summary": "",
         "last_retrieved_sources": [],
     }

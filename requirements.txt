@@ -18,4 +18,3 @@ ragas
 datasets
 langchain-openai
 pypdf
-trafilatura

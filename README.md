@@ -88,22 +88,10 @@ streamlit run app.py
 - If the NVIDIA key is missing, the app still retrieves papers but skips LLM-based answering.
 - In `AGENT_MODE=true`, the app runs a LangGraph-backed tool orchestrator.
 - In `EVAL_MODE=true`, the app runs online RAG evaluation sampling and stores results locally.
-
-### Paper-focused follow-up mode
-
-- Turn on **Follow-up mode** in the chat panel to rewrite short follow-up questions with conversation context.
-- Use **Suggested Papers** -> **Focus this paper** to activate paper-focused retrieval (click again to deselect).
-- When paper focus is active, answers are grounded in that paper index first.
-- Suggested papers include PMID, DOI (when available), PubMed link, and a resolved full-text landing URL.
-- Full-text ingestion priority is:
-  - PMC full text (when PMCID is accessible),
-  - Open-access HTML link extraction,
-  - User-uploaded PDF.
-- If full text is unavailable/paywalled, the app explicitly states that it is answering from abstract/metadata only and suggests alternatives.
-- You can ingest by either:
-  - uploading a PDF, or
-  - providing an accessible URL via **Fetch & Ingest from link**.
-- Paywall-safe behavior: the app does not bypass paywalls or login barriers.
+- Use **Follow-up mode** to rewrite follow-up questions into standalone retrieval queries.
+- Use **Show papers** when you want ranked source links in the UI.  
+  With this toggle off, retrieval still grounds the answer but source link cards are hidden.
+- Source links include PubMed and DOI (if available). The app does not scrape DOI publisher pages.
 
 ---
 
@@ -113,7 +101,6 @@ streamlit run app.py
 - `src/core/`: baseline RAG pipeline and chain logic
 - `src/agent/`: agent orchestrator and tool wrappers
 - `src/chat/`: follow-up contextualization and routing
-- `src/papers/`: paper fetch/cache/index helpers
 - `src/integrations/`: PubMed, Chroma, NVIDIA integrations
 - `src/ui/`: rendering/formatting helpers
 - `eval/`: evaluation runner, metrics, store, and dashboard helpers
@@ -148,8 +135,6 @@ OPENAI_API_KEY=<NVIDIA_API_KEY_FOR_OPENAI_COMPAT>
 OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
 # optional:
 RAGAS_JUDGE_MODEL=meta/llama-3.1-8b-instruct
-UNPAYWALL_EMAIL=<your_email_for_oa_lookup>
-HF_TOKEN=<optional_huggingface_token>
 ```
 
 Behavior:

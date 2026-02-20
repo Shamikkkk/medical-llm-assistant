@@ -2,19 +2,12 @@ from __future__ import annotations
 
 from io import BytesIO
 import logging
-import os
 import xml.etree.ElementTree as ET
 
 import requests
 
 from src.integrations.pubmed import pubmed_efetch
-from src.papers.doi import extract_doi
-from src.papers.fetch_fulltext import (
-    STATUS_OK_OA_HTML,
-    STATUS_PAYWALLED_OR_BLOCKED,
-    fetch_readable_text_from_url,
-)
-from src.papers.fulltext_discovery import discover_fulltext
+from src.papers.doi import build_doi_url, extract_doi
 from src.papers.store import (
     PAPER_TIER_ABSTRACT,
     PAPER_TIER_FULL_TEXT,
@@ -40,47 +33,25 @@ def fetch_paper_content(pmid: str) -> PaperContent | None:
     record = records[0]
     doi = extract_doi(str(record.get("doi", "") or ""))
     pmcid = str(record.get("pmcid", "") or "").strip() or get_pmcid_from_pmid(normalized_pmid) or ""
-    discovered = discover_fulltext(
-        doi=doi,
-        pmcid=pmcid,
-        current_url=str(record.get("fulltext_url", "") or ""),
-        unpaywall_email=os.getenv("UNPAYWALL_EMAIL"),
-    )
-    fulltext_url = discovered.fulltext_url
+    fulltext_url = str(record.get("fulltext_url", "") or "").strip()
+    if not fulltext_url:
+        fulltext_url = build_doi_url(doi)
     full_text = ""
     source_label = "PUBMED_ABSTRACT"
-    notes = ""
+    notes = (
+        "Full text appears paywalled or unavailable for automatic retrieval. "
+        "I can use abstract/metadata evidence. For deeper analysis, upload the PDF "
+        "or paste relevant sections."
+    )
 
     if pmcid:
         full_text = fetch_pmc_full_text(pmcid)
         if full_text:
             source_label = "PMC"
             fulltext_url = fulltext_url or f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
+            notes = "Using PubMed Central full text."
         else:
             notes = "PMCID exists but PMC full text extraction failed; using abstract metadata only."
-
-    if not full_text and fulltext_url and discovered.is_open_access:
-        text, meta, status = fetch_readable_text_from_url(fulltext_url)
-        if status == STATUS_OK_OA_HTML and text:
-            full_text = text
-            source_label = "OA_HTML"
-            fulltext_url = str(meta.get("final_url") or fulltext_url)
-            notes = "Full text extracted from a publicly accessible open-access page."
-        elif status == STATUS_PAYWALLED_OR_BLOCKED:
-            notes = (
-                "Full text appears paywalled; I can't fetch it automatically. "
-                "You can (a) paste sections, (b) upload the PDF, or (c) provide an "
-                "accessible link that allows text extraction."
-            )
-
-    if not full_text and not notes:
-        notes = (
-            "Full text appears paywalled; I can't fetch it automatically. "
-            "You can (a) paste sections, (b) upload the PDF, or (c) provide an "
-            "accessible link that allows text extraction."
-        )
-        if discovered.note:
-            notes = f"{notes} ({discovered.note})"
 
     content_tier = PAPER_TIER_FULL_TEXT if full_text else PAPER_TIER_ABSTRACT
     if not full_text:

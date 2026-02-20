@@ -21,6 +21,8 @@ def build_rag_chain(llm, retriever):
                 "Do not invent PMIDs and cite only PMIDs present in the abstracts. "
                 "Do NOT include a 'Reframe:' section. "
                 "Do NOT describe how you interpreted or reframed the question. "
+                "Answer the user's current question explicitly and avoid vague phrasing. "
+                "If the question is a follow-up, briefly anchor to prior context in one sentence. "
                 "Answer directly and cite PMIDs. "
                 "Use this structure: "
                 "(1) 1-2 short paragraphs with a direct answer. "
