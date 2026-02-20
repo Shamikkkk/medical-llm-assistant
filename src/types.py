@@ -9,6 +9,9 @@ class SourceItem(TypedDict, total=False):
     title: str
     journal: str
     year: str
+    doi: str
+    pmcid: str
+    fulltext_url: str
 
 
 class PipelineResponse(TypedDict, total=False):
@@ -27,6 +30,11 @@ class PipelineResponse(TypedDict, total=False):
     intent_confidence: float
     reframe_note: str
     retrieved_contexts: list[dict[str, str]]
+    paper_focus_mode: bool
+    paper_focus_notice: str
+    paper_focus_pmid: str
+    effective_query: str
+    rewritten_query: str
     validation_warning: str
     validation_issues: list[str]
     validation_confidence: str
