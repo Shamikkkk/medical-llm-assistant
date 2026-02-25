@@ -20,7 +20,7 @@ class _DummyLlm:
 
 class FollowupContextualizationTests(TestCase):
     def test_followup_mode_rewrites_even_when_query_is_long(self) -> None:
-        llm = _DummyLlm("Standalone cardiovascular query about side effects of SGLT2 inhibitors")
+        llm = _DummyLlm("Standalone biomedical query about side effects of SGLT2 inhibitors")
         messages = [
             {"role": "user", "content": "Tell me about SGLT2 inhibitors in heart failure."},
             {"role": "assistant", "content": "They reduce HF hospitalization in key trials."},

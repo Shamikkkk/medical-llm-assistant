@@ -12,6 +12,30 @@ from src.types import SourceItem
 from src.ui.formatters import beautify_text, doi_url, pubmed_url, strip_reframe_block
 
 
+def auto_scroll() -> None:
+    """Scroll the parent Streamlit page toward the latest chat content."""
+    components.html(
+        """
+        <script>
+        const root = window.parent.document;
+        const target = root.getElementById("chat-bottom");
+        const doScroll = () => {
+          if (target) {
+            target.scrollIntoView({ behavior: "smooth", block: "end" });
+          } else {
+            window.parent.scrollTo({
+              top: root.body ? root.body.scrollHeight : 0,
+              behavior: "smooth",
+            });
+          }
+        };
+        requestAnimationFrame(doScroll);
+        </script>
+        """,
+        height=0,
+    )
+
+
 def apply_app_styles() -> None:
     st.markdown(
         """
@@ -75,9 +99,9 @@ def apply_app_styles() -> None:
 
 
 def render_header(config: AppConfig) -> None:
-    title = str(config.app_title or "Cardio PubMed Assistant")
-    subtitle = (
-        "Cardiovascular and cardiopulmonary overlap literature assistant (PubMed RAG)"
+    title = str(config.app_title or "PubMed Literature Assistant")
+    subtitle = str(
+        config.app_description or "Medical literature assistant grounded in PubMed abstracts"
     )
     _, middle_col, right_col = st.columns([1, 3, 1])
     with middle_col:

@@ -50,14 +50,18 @@ def build_query_cache_document(
     pubmed_query: str,
     pmids: list[str] | None = None,
 ) -> Document:
+    normalized_pmids = _normalize_pmids(pmids)
+    metadata = {
+        "normalized_query": _normalize_query(query),
+        "pubmed_query": pubmed_query,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if normalized_pmids:
+        metadata["pmids"] = normalized_pmids
+        metadata["pmids_str"] = ",".join(normalized_pmids)
     return Document(
         page_content=query,
-        metadata={
-            "normalized_query": _normalize_query(query),
-            "pubmed_query": pubmed_query,
-            "pmids": pmids or [],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        },
+        metadata=metadata,
     )
 
 
@@ -66,10 +70,20 @@ def add_query_cache_entry(
     query: str,
     pubmed_query: str,
     pmids: list[str] | None = None,
-) -> None:
-    doc = build_query_cache_document(query, pubmed_query, pmids)
+) -> bool:
+    normalized_pmids = _normalize_pmids(pmids)
+    if not normalized_pmids:
+        LOGGER.info(
+            "[PIPELINE] Skipping query cache insert: empty pmids | query='%s' pubmed_query='%s'",
+            _trim(query),
+            _trim(pubmed_query),
+        )
+        return False
+
+    doc = build_query_cache_document(query, pubmed_query, normalized_pmids)
     store.add_documents([doc])
     _persist_if_supported(store)
+    return True
 
 
 def upsert_abstracts(
@@ -210,6 +224,15 @@ def lookup_cached_query(
 
 def _normalize_query(query: str) -> str:
     return " ".join(query.lower().strip().split())
+
+
+def _normalize_pmids(pmids: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for raw in pmids or []:
+        pmid = str(raw).strip()
+        if pmid:
+            normalized.append(pmid)
+    return normalized
 
 
 def _persist_if_supported(store: Chroma) -> None:

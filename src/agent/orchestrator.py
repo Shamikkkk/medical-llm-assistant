@@ -133,7 +133,7 @@ def stream_agent_chat(query: str, session_id: str, top_n: int = 10):
         "docs_preview": docs_preview,
         "pubmed_query": pubmed_query,
         "reranker_active": bool(retrieve.get("reranker_active", False)),
-        "scope_label": getattr(scope, "label", "CARDIOVASCULAR"),
+        "scope_label": getattr(scope, "label", "BIOMEDICAL"),
         "scope_message": getattr(scope, "user_message", "ok"),
         "reframed_query": getattr(scope, "reframed_query", "") or "",
         "reframe_note": reframe_note,
@@ -194,7 +194,7 @@ def _run_sequential(state: AgentState) -> AgentState:
     state["pubmed_query"] = refinement["pubmed_query"]
     state["retrieval_query"] = refinement["retrieval_query"]
     state["reframe_note"] = refinement["reframe_note"]
-    state["scope_label"] = getattr(scope, "label", "CARDIOVASCULAR")
+    state["scope_label"] = getattr(scope, "label", "BIOMEDICAL")
     state["scope_message"] = getattr(scope, "user_message", "ok")
     state["reframed_query"] = getattr(scope, "reframed_query", "") or ""
 
@@ -366,7 +366,7 @@ def _state_to_payload(state: AgentState) -> PipelineResponse:
         "docs_preview": list(state.get("docs_preview", []) or []),
         "pubmed_query": str(state.get("pubmed_query", "") or ""),
         "reranker_active": bool(state.get("reranker_active", False)),
-        "scope_label": str(state.get("scope_label", "CARDIOVASCULAR")),
+        "scope_label": str(state.get("scope_label", "BIOMEDICAL")),
         "scope_message": str(state.get("scope_message", "ok")),
         "reframed_query": str(state.get("reframed_query", "") or ""),
         "reframe_note": str(state.get("reframe_note", "") or ""),

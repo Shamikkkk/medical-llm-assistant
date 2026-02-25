@@ -1,15 +1,14 @@
-# Cardiovascular PubMed Assistant (Conversational)
+# PubMed Literature Assistant (Conversational)
 
 This is a simple web app that helps you search **PubMed** using normal English questions and then gives you a concise, evidence-based response grounded in real PubMed abstracts.
 
-**Important:** This assistant is **specialized in cardiovascular (heart and blood vessel) topics only**.  
-If you ask about unrelated medical areas, it will politely refuse.
+This assistant supports biomedical and health literature questions across specialties.
 
 ---
 
 ## What this app does
 
-1. You type a cardiovascular research question (example: “Do SGLT2 inhibitors reduce heart failure hospitalization?”).
+1. You type a medical or public-health research question (example: "What is the evidence for temozolomide in glioblastoma?").
 2. The app converts your question into a PubMed-friendly search query.
 3. It pulls the most relevant PubMed abstracts.
 4. It summarizes what the abstracts collectively suggest and shows the sources (PMIDs).

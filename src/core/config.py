@@ -36,10 +36,10 @@ def load_config() -> AppConfig:
     """Load environment variables and return app configuration."""
     load_dotenv(override=False)
 
-    app_title = os.getenv("APP_TITLE", "Cardio PubMed Assistant")
+    app_title = os.getenv("APP_TITLE", "PubMed Literature Assistant")
     app_description = os.getenv(
         "APP_DESCRIPTION",
-        "Cardiovascular-focused PubMed conversational assistant.",
+        "General medical PubMed conversational assistant.",
     )
     nvidia_api_key = os.getenv("NVIDIA_API_KEY")
     data_dir = Path(os.getenv("DATA_DIR", "./data")).expanduser().absolute()

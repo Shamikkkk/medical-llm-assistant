@@ -16,6 +16,32 @@ MEDICAL_KEYWORDS: tuple[str, ...] = (
     "cardio",
     "cardiac",
     "heart",
+    "oncology",
+    "cancer",
+    "tumor",
+    "glioblastoma",
+    "chemotherapy",
+    "radiotherapy",
+    "neurology",
+    "brain",
+    "dementia",
+    "epilepsy",
+    "parkinson",
+    "gastro",
+    "gut",
+    "ibs",
+    "ibd",
+    "gerd",
+    "microbiome",
+    "fodmap",
+    "renal",
+    "kidney",
+    "ckd",
+    "endocrine",
+    "diabetes",
+    "thyroid",
+    "infection",
+    "antibiotic",
     "hypertension",
     "atrial",
     "coronary",
@@ -91,15 +117,15 @@ def smalltalk_reply(query: str, llm: Any | None = None) -> str:
     normalized = _normalize(query)
     if "help" in normalized and "you" in normalized:
         return (
-            "I can help with cardiovascular and cardiopulmonary overlap literature questions. "
+            "I can help with medical and health literature questions across specialties. "
             "Ask a clinical question and I will search PubMed abstracts, summarize findings, "
             "and provide PMID-linked sources."
         )
     if "thank" in normalized:
-        return "You're welcome. Ask me any cardiovascular evidence question when you're ready."
+        return "You're welcome. Ask me any medical evidence question when you're ready."
     return (
-        "Hi. I can help with cardiovascular and cardiopulmonary overlap PubMed questions. "
-        "For example: 'DOACs vs warfarin for stroke prevention in atrial fibrillation.'"
+        "Hi. I can help with PubMed-backed medical questions. "
+        "For example: 'What is the evidence for temozolomide in glioblastoma?'"
     )
 
 

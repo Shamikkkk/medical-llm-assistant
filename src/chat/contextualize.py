@@ -108,7 +108,7 @@ def _rewrite_with_llm(
     llm: Any,
 ) -> str | None:
     prompt = (
-        "Rewrite the user question into one standalone cardiovascular research question.\n"
+        "Rewrite the user question into one standalone biomedical research question.\n"
         "Rules:\n"
         "- Preserve intent exactly.\n"
         "- Resolve pronouns/references using history.\n"

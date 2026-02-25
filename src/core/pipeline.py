@@ -299,7 +299,7 @@ def build_contextual_retrieval_query(
     if llm is not None:
         prompt = (
             "Rewrite the follow-up question into a standalone PubMed retrieval query "
-            "in the cardiovascular context. Use history to resolve references. "
+            "in the biomedical context. Use history to resolve references. "
             "Return ONLY the rewritten query string.\n"
             f"History: {history_excerpt}\n"
             f"Follow-up: {user_query}\n"
@@ -340,7 +340,7 @@ def _prepare_chat_context(
 
     llm = llm or _get_llm_safe()
     scope = scope or ScopeResult(
-        label="CARDIOVASCULAR",
+        label="BIOMEDICAL",
         allow=True,
         user_message="ok",
         reframed_query=None,
@@ -426,7 +426,7 @@ def _prepare_chat_context(
     )
 
     reframe_note = ""
-    if scope.label == "CARDIOPULMONARY_OVERLAP" and scope.reframed_query:
+    if scope.reframed_query and scope.user_message != "ok":
         reframe_note = scope.user_message
 
     _pipeline_log(

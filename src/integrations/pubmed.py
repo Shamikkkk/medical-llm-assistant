@@ -122,7 +122,7 @@ def rewrite_to_pubmed_query(user_query: str, llm: Any | None) -> str:
         "PubMed-ready query.\n"
         "Rules:\n"
         "- Include key concepts using boolean operators (AND/OR).\n"
-        "- Enforce a cardiovascular focus (heart/cardiac/cardiovascular terms).\n"
+        "- Keep the topic domain-appropriate for the user question.\n"
         "- Keep it short (<= 200 characters if possible).\n"
         "- Output only the final query string, no quotes or extra text.\n"
         f"User query: {user_query}\n"
@@ -138,8 +138,6 @@ def rewrite_to_pubmed_query(user_query: str, llm: Any | None) -> str:
     if not cleaned:
         return user_query.strip()
 
-    if not _contains_cardiovascular_term(cleaned):
-        cleaned = f"({cleaned}) AND (cardiovascular OR heart OR cardiac)"
     if len(cleaned) > 200:
         cleaned = cleaned[:200].rstrip()
     return cleaned
@@ -257,10 +255,3 @@ def _normalize_pmcid(value: str) -> str:
     digits = "".join(ch for ch in text if ch.isdigit())
     return f"PMC{digits}" if digits else ""
 
-
-def _contains_cardiovascular_term(text: str) -> bool:
-    lowered = text.lower()
-    for term in ("cardiovascular", "cardiac", "heart", "coronary"):
-        if term in lowered:
-            return True
-    return False

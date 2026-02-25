@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import streamlit as st
-import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 from src import app_state
@@ -13,7 +12,9 @@ from src.core.config import load_config
 from src.history import clear_session_history
 from src.logging_utils import setup_logging
 from src.ui.formatters import beautify_text, strip_reframe_block
+from src.ui.loading_messages import detect_topic, pick_loading_message
 from src.ui.render import (
+    auto_scroll,
     apply_app_styles,
     render_chat,
     render_header,
@@ -30,18 +31,7 @@ def _safe_rerun() -> None:
 
 
 def _scroll_to_bottom() -> None:
-    components.html(
-        """
-        <script>
-        const root = window.parent.document;
-        const target = root.getElementById("chat-bottom");
-        if (target) {
-            target.scrollIntoView({behavior: "smooth", block: "end"});
-        }
-        </script>
-        """,
-        height=0,
-    )
+    auto_scroll()
 
 
 def _consume_stream_response(stream, placeholder) -> tuple[str, dict]:
@@ -149,7 +139,9 @@ def _render_chat_experience(config) -> None:
     render_chat(app_state.get_active_messages(), top_n=top_n, show_papers=show_papers)
     st.markdown("<div id='chat-bottom'></div>", unsafe_allow_html=True)
 
-    user_input = st.chat_input("Ask a cardiovascular question")
+    user_input = st.chat_input(
+        "Ask a medical or health question (e.g., oncology, gut health, neurology)"
+    )
     if not user_input:
         return
 
@@ -160,7 +152,8 @@ def _render_chat_experience(config) -> None:
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
-        placeholder.markdown("Stay steady, breathe deep...", unsafe_allow_html=False)
+        loading_message = pick_loading_message(detect_topic(user_input), user_input)
+        placeholder.markdown(loading_message, unsafe_allow_html=False)
 
         answer_text = ""
         final_payload: dict = {}
@@ -258,8 +251,8 @@ def main() -> None:
     config = load_config()
     setup_logging(config.log_level)
     st.set_page_config(
-        page_title="Cardio PubMed Assistant",
-        page_icon=":anatomical_heart:",
+        page_title=str(config.app_title or "PubMed Literature Assistant"),
+        page_icon="📚",
         layout="wide",
     )
 
@@ -269,7 +262,7 @@ def main() -> None:
 
     with st.expander("How to use", expanded=False):
         st.markdown(
-            "- Ask a cardiovascular or cardiopulmonary overlap question.\n"
+            "- Ask a medical or health literature question.\n"
             "- Turn **Follow-up mode** on to rewrite short follow-ups with chat context.\n"
             "- Turn **Show papers** on if you want ranked source links in the UI.\n"
             f"- Adjust **Top-N papers** in the sidebar (current: **{app_state.get_top_n()}**).",
