@@ -38,6 +38,7 @@ class ChatRouterTests(TestCase):
         self.assertNotIn("paper_focus_mode", payload)
         self.assertNotIn("paper_focus_notice", payload)
         self.assertEqual(payload.get("query"), "DOACs vs warfarin")
+        self.assertTrue(payload.get("request_id"))
 
     @patch("src.chat.router.invoke_chat_with_mode")
     @patch("src.chat.router._get_llm_safe")
@@ -70,3 +71,4 @@ class ChatRouterTests(TestCase):
         )
         called_query = mock_invoke_chat_with_mode.call_args.args[0]
         self.assertIn("HFpEF", called_query)
+        self.assertTrue(mock_invoke_chat_with_mode.call_args.kwargs["include_paper_links"])

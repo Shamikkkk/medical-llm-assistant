@@ -5,6 +5,7 @@ import logging
 import re
 
 from src.core.chains import build_chat_chain, build_rag_chain
+from src.core.config import load_config
 from src.core.intent import classify_intent_details, smalltalk_reply
 from src.core.scope import ScopeResult, classify_scope
 from src.integrations.pubmed import (
@@ -14,10 +15,10 @@ from src.integrations.pubmed import (
     to_documents,
 )
 from src.integrations.storage import (
-    add_query_cache_entry,
     get_abstract_store,
     get_query_cache_store,
-    lookup_cached_query,
+    lookup_query_result_cache,
+    remember_query_result,
     upsert_abstracts,
 )
 from src.logging_utils import log_llm_usage
@@ -121,11 +122,17 @@ def pubmed_search_tool(
     persist_dir: str,
     log_pipeline: bool = False,
 ) -> dict[str, Any]:
-    safe_top_n = _sanitize_top_n(top_n)
+    config = load_config()
+    safe_top_n = min(_sanitize_top_n(top_n), int(config.max_abstracts))
     cache_store = get_query_cache_store(persist_dir)
     abstract_store = get_abstract_store(persist_dir)
 
-    cached = lookup_cached_query(cache_store, query)
+    cached = lookup_query_result_cache(
+        query,
+        store=cache_store,
+        ttl_seconds=int(config.pubmed_cache_ttl_seconds),
+        negative_ttl_seconds=int(config.pubmed_negative_cache_ttl_seconds),
+    )
     use_cache = False
     if cached:
         cached_query = str(cached.get("pubmed_query", "") or "")
@@ -143,11 +150,11 @@ def pubmed_search_tool(
         pmids = pubmed_esearch(effective_pubmed_query, retmax=safe_top_n)
         records = pubmed_efetch(pmids)
         documents = to_documents(records)
-        add_query_cache_entry(
-            cache_store,
+        remember_query_result(
             query,
             pubmed_query=effective_pubmed_query,
             pmids=pmids,
+            store=cache_store,
         )
         cache_status = "miss"
 
@@ -298,6 +305,9 @@ def citation_formatting_tool(docs: list[Any], *, top_n: int) -> list[SourceItem]
                 "title": str(meta.get("title", "") or ""),
                 "journal": str(meta.get("journal", "") or ""),
                 "year": str(meta.get("year", "") or ""),
+                "doi": str(meta.get("doi", "") or ""),
+                "pmcid": str(meta.get("pmcid", "") or ""),
+                "fulltext_url": str(meta.get("fulltext_url", "") or ""),
             }
         )
         seen_pmids.add(pmid)

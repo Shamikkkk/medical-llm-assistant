@@ -11,29 +11,58 @@ from src.core.config import AppConfig
 from src.types import SourceItem
 from src.ui.formatters import beautify_text, doi_url, pubmed_url, strip_reframe_block
 
+TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "gi": ("gi", "gastro", "hepatic", "liver", "bowel", "colitis", "pancrea"),
+    "neuro": ("neuro", "brain", "stroke", "seizure", "parkinson", "alzheim", "cognitive"),
+    "cardio": ("cardio", "heart", "atrial", "ventric", "coronary", "hypertension", "hf"),
+    "oncology": (
+        "oncology",
+        "cancer",
+        "tumor",
+        "tumour",
+        "chemo",
+        "metast",
+        "temozolomide",
+        "glioblastoma",
+    ),
+    "pulmonary": ("pulmonary", "copd", "asthma", "lung", "respirat", "pneumonia"),
+}
 
-def auto_scroll() -> None:
+THINKING_MESSAGES: dict[str, tuple[str, ...]] = {
+    "gi": ("Digesting the literature...", "Checking the gut-level evidence..."),
+    "neuro": ("Firing up neurons...", "Tracing the evidence pathways..."),
+    "cardio": ("Following the heartbeat of the evidence...", "Cross-checking the cardiac literature..."),
+    "oncology": ("Scanning the evidence landscape...", "Reviewing the treatment horizon..."),
+    "pulmonary": ("Taking a deep breath through the abstracts...", "Surveying the pulmonary evidence..."),
+    "general": ("Thinking...", "Reviewing the evidence...", "Pulling the relevant abstracts..."),
+}
+
+
+def auto_scroll(*, enabled: bool = True) -> None:
     """Scroll the parent Streamlit page toward the latest chat content."""
-    components.html(
-        """
-        <script>
-        const root = window.parent.document;
-        const target = root.getElementById("chat-bottom");
-        const doScroll = () => {
-          if (target) {
-            target.scrollIntoView({ behavior: "smooth", block: "end" });
-          } else {
-            window.parent.scrollTo({
-              top: root.body ? root.body.scrollHeight : 0,
-              behavior: "smooth",
-            });
-          }
-        };
-        requestAnimationFrame(doScroll);
-        </script>
-        """,
-        height=0,
-    )
+    components.html(build_auto_scroll_html(enabled=enabled), height=0)
+
+
+def build_auto_scroll_html(*, enabled: bool) -> str:
+    if not enabled:
+        return "<div id='chat-autoscroll-disabled'></div>"
+    return """
+    <script>
+    const root = window.parent.document;
+    const target = root.getElementById("chat-bottom");
+    const doScroll = () => {
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "end" });
+      } else {
+        window.parent.scrollTo({
+          top: root.body ? root.body.scrollHeight : 0,
+          behavior: "smooth",
+        });
+      }
+    };
+    requestAnimationFrame(doScroll);
+    </script>
+    """
 
 
 def apply_app_styles() -> None:
@@ -130,12 +159,20 @@ def render_sidebar(
     chats: list[dict],
     active_chat_id: str,
     top_n: int,
+    follow_up_mode: bool,
+    show_papers: bool,
+    show_rewritten_query: bool,
+    auto_scroll_enabled: bool,
 ) -> dict[str, Any]:
     action: dict[str, Any] = {
         "top_n": top_n,
         "new_chat": False,
         "clear_chat": False,
         "switch_chat_id": None,
+        "follow_up_mode": follow_up_mode,
+        "show_papers": show_papers,
+        "show_rewritten_query": show_rewritten_query,
+        "auto_scroll": auto_scroll_enabled,
     }
 
     with st.sidebar:
@@ -146,6 +183,26 @@ def render_sidebar(
             max_value=10,
             value=int(top_n),
             step=1,
+        )
+        action["follow_up_mode"] = st.toggle(
+            "Follow-up mode",
+            value=bool(follow_up_mode),
+            help="Use chat context to rewrite follow-up questions before retrieval.",
+        )
+        action["show_papers"] = st.toggle(
+            "Show papers",
+            value=bool(show_papers),
+            help="Show ranked paper titles and links in the chat response.",
+        )
+        action["show_rewritten_query"] = st.toggle(
+            "Show rewritten query",
+            value=bool(show_rewritten_query),
+            help="Display the interpreted standalone query for follow-up questions.",
+        )
+        action["auto_scroll"] = st.toggle(
+            "Auto-scroll",
+            value=bool(auto_scroll_enabled),
+            help="Keep the newest streamed content in view.",
         )
 
         if _button_stretch("New Chat"):
@@ -176,13 +233,20 @@ def render_sidebar(
     return action
 
 
-def render_chat(messages: list[dict], *, top_n: int, show_papers: bool) -> None:
+def render_chat(
+    messages: list[dict],
+    *,
+    top_n: int,
+    show_papers: bool,
+    show_rewritten_query: bool,
+) -> None:
     for idx, message in enumerate(messages):
         with st.chat_message(message["role"]):
             render_message(
                 message,
                 top_n=top_n,
                 show_papers=show_papers,
+                show_rewritten_query=show_rewritten_query,
                 message_key=f"assistant_{idx}",
             )
 
@@ -192,6 +256,7 @@ def render_message(
     *,
     top_n: int,
     show_papers: bool = True,
+    show_rewritten_query: bool = False,
     message_key: str = "",
 ) -> None:
     role = message.get("role")
@@ -199,8 +264,8 @@ def render_message(
     if role == "assistant":
         st.markdown(beautify_text(content), unsafe_allow_html=False)
         rewritten_query = str(message.get("rewritten_query", "") or "").strip()
-        if rewritten_query:
-            st.caption(f"Follow-up rewrite: {rewritten_query}")
+        if rewritten_query and show_rewritten_query:
+            st.caption(f"Interpreting your question as: {rewritten_query}")
         warning = str(message.get("validation_warning", "") or "").strip()
         issues = message.get("validation_issues", []) or []
         if warning:
@@ -263,6 +328,23 @@ def render_source_item(source: SourceItem) -> None:
     if pmid:
         markdown_lines.append(f"[PubMed]({pubmed_url(pmid)})")
     st.markdown("\n\n".join(markdown_lines), unsafe_allow_html=False)
+
+
+def classify_query_topic(query: str) -> str:
+    normalized = str(query or "").lower()
+    for label, keywords in TOPIC_KEYWORDS.items():
+        if any(keyword in normalized for keyword in keywords):
+            return label
+    return "general"
+
+
+def get_thinking_message(query: str) -> str:
+    topic = classify_query_topic(query)
+    messages = THINKING_MESSAGES.get(topic) or THINKING_MESSAGES["general"]
+    if not messages:
+        return "Thinking..."
+    index = _stable_index(str(query or ""), len(messages))
+    return messages[index]
 
 
 def _rank_sources(items: list[dict], limit: int) -> list[SourceItem]:
@@ -349,7 +431,12 @@ def _render_copy_button(text: str, *, key: str) -> None:
                     const value = {payload};
                     try {{
                         await navigator.clipboard.writeText(value);
-                        this.innerText = "Copied";
+                        this.innerText = "Copied ✅";
+                        const toast = document.createElement("div");
+                        toast.innerText = "Copied ✅";
+                        toast.style.cssText = "position:fixed;bottom:16px;right:16px;background:#111;color:#fff;padding:8px 12px;border-radius:8px;font-size:12px;z-index:9999;opacity:0.95;";
+                        window.parent.document.body.appendChild(toast);
+                        setTimeout(() => toast.remove(), 1200);
                     }} catch (e) {{
                         this.innerText = "Copy failed";
                     }}
@@ -359,3 +446,9 @@ def _render_copy_button(text: str, *, key: str) -> None:
         """,
         height=40,
     )
+
+
+def _stable_index(text: str, size: int) -> int:
+    if size <= 0:
+        return 0
+    return sum(ord(char) for char in str(text or "")) % size

@@ -21,3 +21,10 @@ class UiAutoScrollTests(TestCase):
         self.assertIn("scrollIntoView", script)
         self.assertIn("smooth", script)
         self.assertEqual(kwargs.get("height"), 0)
+
+    def test_build_auto_scroll_html_disabled_returns_marker(self) -> None:
+        from src.ui.render import build_auto_scroll_html
+
+        html = build_auto_scroll_html(enabled=False)
+
+        self.assertIn("chat-autoscroll-disabled", html)

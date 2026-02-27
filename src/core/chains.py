@@ -5,9 +5,37 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
 from src.history import get_session_history
+from src.core.retrieval import build_context_text
+
+try:  # pragma: no cover - import path varies slightly across langchain-core versions
+    from langchain_core.runnables.base import Runnable as _RunnableType
+except Exception:  # pragma: no cover
+    _RunnableType = None
 
 
-def build_rag_chain(llm, retriever):
+def _coerce_retriever_to_runnable(retriever):
+    if _RunnableType is not None and isinstance(retriever, _RunnableType):
+        return retriever
+    if hasattr(retriever, "get_relevant_documents"):
+        return RunnableLambda(lambda query: retriever.get_relevant_documents(query))
+    if callable(retriever):
+        return RunnableLambda(lambda query: retriever(query))
+    if hasattr(retriever, "retrieve"):
+        return RunnableLambda(lambda query: retriever.retrieve(query))
+    if hasattr(retriever, "invoke"):
+        return RunnableLambda(lambda query: retriever.invoke(query))
+    raise TypeError(f"Retriever cannot be coerced to Runnable: {type(retriever)}")
+
+
+def build_rag_chain(
+    llm,
+    retriever,
+    *,
+    max_abstracts: int = 8,
+    max_context_tokens: int = 2500,
+    trim_strategy: str = "truncate",
+):
+    retriever_runnable = _coerce_retriever_to_runnable(retriever)
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -38,8 +66,15 @@ def build_rag_chain(llm, retriever):
 
     context_chain = (
         RunnableLambda(lambda x: x["retrieval_query"])
-        | retriever
-        | RunnableLambda(_format_docs)
+        | retriever_runnable
+        | RunnableLambda(
+            lambda docs: _format_docs(
+                docs,
+                max_abstracts=max_abstracts,
+                max_context_tokens=max_context_tokens,
+                trim_strategy=trim_strategy,
+            )
+        )
     )
     return RunnablePassthrough.assign(context=context_chain) | prompt | llm
 
@@ -53,25 +88,16 @@ def build_chat_chain(base_chain):
     )
 
 
-def _format_docs(docs: list) -> str:
-    sections = []
-    for doc in docs:
-        meta = doc.metadata or {}
-        pmid = meta.get("pmid", "")
-        title = meta.get("title", "")
-        journal = meta.get("journal", "")
-        year = meta.get("year", "")
-        abstract = doc.page_content or ""
-        if title and abstract.lower().startswith(str(title).lower()):
-            abstract = abstract[len(str(title)) :].lstrip()
-        sections.append(
-            "PMID: {pmid}\nTitle: {title}\nJournal: {journal}\nYear: {year}\n"
-            "Abstract: {abstract}".format(
-                pmid=pmid,
-                title=title,
-                journal=journal,
-                year=year,
-                abstract=abstract,
-            )
-        )
-    return "\n\n---\n\n".join(sections)
+def _format_docs(
+    docs: list,
+    *,
+    max_abstracts: int = 8,
+    max_context_tokens: int = 2500,
+    trim_strategy: str = "truncate",
+) -> str:
+    return build_context_text(
+        docs,
+        max_abstracts=max_abstracts,
+        max_context_tokens=max_context_tokens,
+        trim_strategy=trim_strategy,
+    )

@@ -23,7 +23,14 @@ from src.validators import validate_answer
 LOGGER = logging.getLogger("agent.orchestrator")
 
 
-def invoke_agent_chat(query: str, session_id: str, top_n: int = 10) -> PipelineResponse:
+def invoke_agent_chat(
+    query: str,
+    session_id: str,
+    top_n: int = 10,
+    *,
+    request_id: str | None = None,
+    include_paper_links: bool = True,
+) -> PipelineResponse:
     config = load_config()
     llm = _get_llm_safe()
     safe_top_n = _sanitize_top_n(top_n)
@@ -38,7 +45,11 @@ def invoke_agent_chat(query: str, session_id: str, top_n: int = 10) -> PipelineR
     }
 
     state = _run_agent(initial, use_langgraph=bool(config.agent_use_langgraph))
-    payload = _state_to_payload(state)
+    payload = _state_to_payload(
+        state,
+        request_id=request_id,
+        include_paper_links=include_paper_links,
+    )
     payload.update(
         _run_optional_validation(
             config=config,
@@ -51,7 +62,14 @@ def invoke_agent_chat(query: str, session_id: str, top_n: int = 10) -> PipelineR
     return payload
 
 
-def stream_agent_chat(query: str, session_id: str, top_n: int = 10):
+def stream_agent_chat(
+    query: str,
+    session_id: str,
+    top_n: int = 10,
+    *,
+    request_id: str | None = None,
+    include_paper_links: bool = True,
+):
     config = load_config()
     llm = _get_llm_safe()
     safe_top_n = _sanitize_top_n(top_n)
@@ -79,6 +97,7 @@ def stream_agent_chat(query: str, session_id: str, top_n: int = 10):
             "scope_message": getattr(scope, "user_message", message),
             "reframed_query": getattr(scope, "reframed_query", "") or "",
             "retrieved_contexts": [],
+            "request_id": request_id or "",
         }
 
     refinement = query_refinement_tool(
@@ -105,6 +124,7 @@ def stream_agent_chat(query: str, session_id: str, top_n: int = 10):
     )
     contexts = context_export_tool(retrieve["docs"], top_n=safe_top_n)
     sources = citation_formatting_tool(retrieve["docs"], top_n=safe_top_n)
+    sources = _filter_source_links(sources, include_paper_links=include_paper_links)
     docs_preview = search["docs_preview"]
 
     stream = answer_synthesis_stream_tool(
@@ -140,6 +160,7 @@ def stream_agent_chat(query: str, session_id: str, top_n: int = 10):
         "intent_label": intent_label,
         "intent_confidence": intent_confidence,
         "retrieved_contexts": contexts,
+        "request_id": request_id or "",
     }
     payload.update(
         _run_optional_validation(
@@ -342,7 +363,12 @@ def _get_langgraph_runner() -> Callable[[AgentState], AgentState] | None:
     return runner
 
 
-def _state_to_payload(state: AgentState) -> PipelineResponse:
+def _state_to_payload(
+    state: AgentState,
+    *,
+    request_id: str | None,
+    include_paper_links: bool,
+) -> PipelineResponse:
     status = str(state.get("status", "out_of_scope"))
     if status in {"smalltalk", "out_of_scope"}:
         return {
@@ -356,13 +382,18 @@ def _state_to_payload(state: AgentState) -> PipelineResponse:
             "scope_message": str(state.get("scope_message", "") or ""),
             "reframed_query": str(state.get("reframed_query", "") or ""),
             "retrieved_contexts": [],
+            "request_id": request_id or "",
         }
 
+    sources = _filter_source_links(
+        list(state.get("sources", []) or []),
+        include_paper_links=include_paper_links,
+    )
     return {
         "status": "answered",
         "answer": str(state.get("answer", "") or ""),
         "query": str(state.get("query", "") or ""),
-        "sources": list(state.get("sources", []) or []),
+        "sources": sources,
         "docs_preview": list(state.get("docs_preview", []) or []),
         "pubmed_query": str(state.get("pubmed_query", "") or ""),
         "reranker_active": bool(state.get("reranker_active", False)),
@@ -373,7 +404,25 @@ def _state_to_payload(state: AgentState) -> PipelineResponse:
         "intent_label": str(state.get("intent_label", "medical")),
         "intent_confidence": float(state.get("intent_confidence", 0.0) or 0.0),
         "retrieved_contexts": list(state.get("retrieved_contexts", []) or []),
+        "request_id": request_id or "",
     }
+
+
+def _filter_source_links(
+    sources: list[dict[str, Any]],
+    *,
+    include_paper_links: bool,
+) -> list[dict[str, Any]]:
+    if include_paper_links:
+        return [dict(item) for item in sources]
+    filtered: list[dict[str, Any]] = []
+    for item in sources:
+        copy = dict(item)
+        copy.pop("doi", None)
+        copy.pop("pmcid", None)
+        copy.pop("fulltext_url", None)
+        filtered.append(copy)
+    return filtered
 
 
 def _run_optional_validation(

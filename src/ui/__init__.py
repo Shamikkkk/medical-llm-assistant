@@ -5,7 +5,11 @@ from src.ui.loading_messages import detect_topic, pick_loading_message
 
 try:  # pragma: no cover - optional during lightweight test environments
     from src.ui.render import (
+        auto_scroll,
         apply_app_styles,
+        build_auto_scroll_html,
+        classify_query_topic,
+        get_thinking_message,
         render_chat,
         render_header,
         render_message,
@@ -27,7 +31,11 @@ __all__ = [
 ]
 
 for _name in (
+    "auto_scroll",
     "apply_app_styles",
+    "build_auto_scroll_html",
+    "classify_query_topic",
+    "get_thinking_message",
     "render_chat",
     "render_header",
     "render_message",

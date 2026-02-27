@@ -13,8 +13,10 @@ class _DummyResponse:
 class _DummyLlm:
     def __init__(self, content: str) -> None:
         self._content = content
+        self.last_prompt = ""
 
-    def invoke(self, _: str):
+    def invoke(self, prompt: str):
+        self.last_prompt = prompt
         return _DummyResponse(self._content)
 
 
@@ -47,3 +49,22 @@ class FollowupContextualizationTests(TestCase):
         )
         self.assertTrue(used)
         self.assertNotEqual(rewritten, "What about side effects?")
+
+    def test_contextualize_uses_conversation_summary_and_last_question(self) -> None:
+        llm = _DummyLlm("Standalone question about DOAC bleeding risk in atrial fibrillation")
+        messages = [
+            {"role": "user", "content": "Summarize DOAC versus warfarin evidence in AF."},
+            {"role": "assistant", "content": "We reviewed stroke and bleeding outcomes."},
+        ]
+        rewritten, summary, used = contextualize_question(
+            user_query="What about bleeding risk?",
+            chat_messages=messages,
+            follow_up_mode=True,
+            conversation_summary="Conversation summary: DOACs in AF with focus on safety outcomes.",
+            llm=llm,
+        )
+        self.assertTrue(used)
+        self.assertIn("DOAC", rewritten)
+        self.assertIn("Conversation summary", llm.last_prompt)
+        self.assertIn("Summarize DOAC versus warfarin evidence in AF.", llm.last_prompt)
+        self.assertIn("DOACs in AF", summary)

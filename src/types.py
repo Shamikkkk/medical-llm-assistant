@@ -19,6 +19,7 @@ class PipelineResponse(TypedDict, total=False):
     answer: str
     message: str
     query: str
+    request_id: str
     sources: list[SourceItem]
     docs_preview: list[SourceItem]
     pubmed_query: str
@@ -32,6 +33,9 @@ class PipelineResponse(TypedDict, total=False):
     retrieved_contexts: list[dict[str, str]]
     effective_query: str
     rewritten_query: str
+    cache_hit: bool
+    cache_status: str
+    alignment_issues: list[str]
     validation_warning: str
     validation_issues: list[str]
     validation_confidence: str

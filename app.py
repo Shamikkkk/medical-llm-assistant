@@ -8,17 +8,18 @@ from eval.dashboard import render_evaluation_dashboard
 from eval.evaluator import evaluate_turn, should_sample_query
 from eval.store import EvalStore
 from src.chat.router import invoke_chat_request, stream_chat_request
-from src.core.config import load_config
+from src.core.config import ConfigValidationError, load_config
 from src.history import clear_session_history
-from src.logging_utils import setup_logging
+from src.logging_utils import log_event, setup_logging
+from src.ui.metrics_dashboard import render_metrics_dashboard
 from src.ui.formatters import beautify_text, strip_reframe_block
-from src.ui.loading_messages import detect_topic, pick_loading_message
 from src.ui.render import (
     auto_scroll,
     apply_app_styles,
+    get_thinking_message,
     render_chat,
     render_header,
-    render_ranked_sources,
+    render_message,
     render_sidebar,
 )
 
@@ -30,11 +31,11 @@ def _safe_rerun() -> None:
         st.experimental_rerun()
 
 
-def _scroll_to_bottom() -> None:
-    auto_scroll()
+def _scroll_to_bottom(*, enabled: bool) -> None:
+    auto_scroll(enabled=enabled)
 
 
-def _consume_stream_response(stream, placeholder) -> tuple[str, dict]:
+def _consume_stream_response(stream, placeholder, *, auto_scroll_enabled: bool) -> tuple[str, dict]:
     answer_text = ""
     final_payload: dict = {}
     chunk_count = 0
@@ -50,8 +51,8 @@ def _consume_stream_response(stream, placeholder) -> tuple[str, dict]:
         display_text = beautify_text(strip_reframe_block(answer_text))
         placeholder.markdown(display_text, unsafe_allow_html=False)
         chunk_count += 1
-        if chunk_count % 2 == 0:
-            _scroll_to_bottom()
+        if auto_scroll_enabled and chunk_count % 2 == 0:
+            _scroll_to_bottom(enabled=True)
     return answer_text, final_payload
 
 
@@ -110,33 +111,18 @@ def _maybe_run_online_evaluation(
     EvalStore(getattr(config, "eval_store_path")).append(record)
 
 
-def _render_controls() -> tuple[bool, bool]:
-    follow_up_mode = app_state.get_follow_up_mode()
-    show_papers = app_state.get_show_papers()
-    col1, col2 = st.columns(2)
-    with col1:
-        next_follow_up = st.toggle(
-            "Follow-up mode",
-            value=follow_up_mode,
-            help="Use chat context to rewrite follow-up questions before retrieval.",
-        )
-    with col2:
-        next_show_papers = st.toggle(
-            "Show papers",
-            value=show_papers,
-            help="Display ranked paper links (PubMed + DOI) in the UI.",
-        )
-    if next_follow_up != follow_up_mode:
-        app_state.set_follow_up_mode(next_follow_up)
-    if next_show_papers != show_papers:
-        app_state.set_show_papers(next_show_papers)
-    return bool(next_follow_up), bool(next_show_papers)
-
-
 def _render_chat_experience(config) -> None:
     top_n = app_state.get_top_n()
-    follow_up_mode, show_papers = _render_controls()
-    render_chat(app_state.get_active_messages(), top_n=top_n, show_papers=show_papers)
+    follow_up_mode = app_state.get_follow_up_mode()
+    show_papers = app_state.get_show_papers()
+    show_rewritten_query = app_state.get_show_rewritten_query()
+    auto_scroll_enabled = app_state.get_auto_scroll()
+    render_chat(
+        app_state.get_active_messages(),
+        top_n=top_n,
+        show_papers=show_papers,
+        show_rewritten_query=show_rewritten_query,
+    )
     st.markdown("<div id='chat-bottom'></div>", unsafe_allow_html=True)
 
     user_input = st.chat_input(
@@ -148,17 +134,18 @@ def _render_chat_experience(config) -> None:
     app_state.append_active_message({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input, unsafe_allow_html=False)
-    _scroll_to_bottom()
+    _scroll_to_bottom(enabled=auto_scroll_enabled)
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
-        loading_message = pick_loading_message(detect_topic(user_input), user_input)
+        loading_message = get_thinking_message(user_input)
         placeholder.markdown(loading_message, unsafe_allow_html=False)
 
         answer_text = ""
         final_payload: dict = {}
         session_id = app_state.get_active_chat_id()
         chat_messages = app_state.get_active_messages()[:-1]
+        conversation_summary = app_state.get_conversation_summary()
 
         try:
             stream = stream_chat_request(
@@ -168,8 +155,14 @@ def _render_chat_experience(config) -> None:
                 agent_mode=bool(getattr(config, "agent_mode", False)),
                 follow_up_mode=follow_up_mode,
                 chat_messages=chat_messages,
+                show_papers=show_papers,
+                conversation_summary=conversation_summary,
             )
-            answer_text, final_payload = _consume_stream_response(stream, placeholder)
+            answer_text, final_payload = _consume_stream_response(
+                stream,
+                placeholder,
+                auto_scroll_enabled=auto_scroll_enabled,
+            )
         except Exception:
             final_payload = invoke_chat_request(
                 query=user_input,
@@ -178,6 +171,8 @@ def _render_chat_experience(config) -> None:
                 agent_mode=bool(getattr(config, "agent_mode", False)),
                 follow_up_mode=follow_up_mode,
                 chat_messages=chat_messages,
+                show_papers=show_papers,
+                conversation_summary=conversation_summary,
             )
             answer_text = str(
                 final_payload.get("answer")
@@ -196,13 +191,9 @@ def _render_chat_experience(config) -> None:
 
         answer_text = strip_reframe_block(answer_text)
         final_payload["answer"] = answer_text
-        placeholder.markdown(beautify_text(answer_text), unsafe_allow_html=False)
-        _scroll_to_bottom()
+        placeholder.empty()
 
         rewritten_query = str(final_payload.get("rewritten_query", "") or "").strip()
-        if rewritten_query:
-            st.caption(f"Follow-up rewrite: {rewritten_query}")
-
         status = str(final_payload.get("status", "answered"))
         assistant_message = {
             "role": "assistant",
@@ -217,15 +208,14 @@ def _render_chat_experience(config) -> None:
         }
         if status in {"out_of_scope", "smalltalk"}:
             assistant_message = {"role": "assistant", "content": answer_text, "status": status}
-        else:
-            warning = str(final_payload.get("validation_warning", "") or "").strip()
-            issues = final_payload.get("validation_issues", []) or []
-            if warning:
-                st.warning(warning)
-            if issues:
-                with st.expander("Validation details", expanded=False):
-                    for issue in issues:
-                        st.markdown(f"- {issue}", unsafe_allow_html=False)
+
+        render_message(
+            assistant_message,
+            top_n=top_n,
+            show_papers=show_papers,
+            show_rewritten_query=show_rewritten_query,
+            message_key=str(final_payload.get("request_id") or session_id),
+        )
 
         app_state.append_active_message(assistant_message)
         existing_context = app_state.get_active_context_state()
@@ -239,24 +229,39 @@ def _render_chat_experience(config) -> None:
             last_topic_summary=str(final_payload.get("last_topic_summary", "") or ""),
             last_retrieved_sources=new_sources,
         )
+        app_state.update_conversation_summary(app_state.get_active_messages())
         _maybe_run_online_evaluation(config=config, query=user_input, payload=final_payload)
-
-        if show_papers and status == "answered":
-            render_ranked_sources(assistant_message.get("sources", []) or [], top_n=top_n)
-        _scroll_to_bottom()
+        _scroll_to_bottom(enabled=auto_scroll_enabled)
 
 
 def main() -> None:
     load_dotenv(override=False)
     config = load_config()
     setup_logging(config.log_level)
+    log_event("config.loaded", config=config.masked_summary())
     st.set_page_config(
         page_title=str(config.app_title or "PubMed Literature Assistant"),
         page_icon="📚",
         layout="wide",
     )
 
-    app_state.init_state(default_top_n=10)
+    try:
+        config.require_valid()
+    except ConfigValidationError as exc:
+        apply_app_styles()
+        render_header(config)
+        st.error(str(exc))
+        with st.expander("Resolved Config", expanded=False):
+            st.json(config.masked_summary())
+        return
+
+    app_state.init_state(
+        default_top_n=10,
+        default_show_papers=False,
+        default_show_rewritten_query=bool(config.show_rewritten_query),
+        default_auto_scroll=bool(config.auto_scroll),
+        default_follow_up_mode=True,
+    )
     apply_app_styles()
     render_header(config)
 
@@ -264,17 +269,29 @@ def main() -> None:
         st.markdown(
             "- Ask a medical or health literature question.\n"
             "- Turn **Follow-up mode** on to rewrite short follow-ups with chat context.\n"
-            "- Turn **Show papers** on if you want ranked source links in the UI.\n"
+            "- Use the sidebar toggles for paper links, rewritten query display, and auto-scroll.\n"
             f"- Adjust **Top-N papers** in the sidebar (current: **{app_state.get_top_n()}**).",
             unsafe_allow_html=False,
         )
+    with st.expander("Runtime Config", expanded=False):
+        st.json(config.masked_summary())
 
     sidebar_action = render_sidebar(
         chats=app_state.get_recent_chats(limit=5),
         active_chat_id=app_state.get_active_chat_id(),
         top_n=app_state.get_top_n(),
+        follow_up_mode=app_state.get_follow_up_mode(),
+        show_papers=app_state.get_show_papers(),
+        show_rewritten_query=app_state.get_show_rewritten_query(),
+        auto_scroll_enabled=app_state.get_auto_scroll(),
     )
     app_state.set_top_n(sidebar_action["top_n"])
+    app_state.set_follow_up_mode(bool(sidebar_action.get("follow_up_mode", True)))
+    app_state.set_show_papers(bool(sidebar_action.get("show_papers", False)))
+    app_state.set_show_rewritten_query(
+        bool(sidebar_action.get("show_rewritten_query", config.show_rewritten_query))
+    )
+    app_state.set_auto_scroll(bool(sidebar_action.get("auto_scroll", config.auto_scroll)))
 
     if sidebar_action.get("switch_chat_id"):
         app_state.switch_chat(str(sidebar_action["switch_chat_id"]))
@@ -296,12 +313,26 @@ def main() -> None:
         _safe_rerun()
         return
 
-    if bool(getattr(config, "eval_mode", False)):
+    if bool(getattr(config, "eval_mode", False)) and bool(getattr(config, "metrics_mode", False)):
+        chat_tab, eval_tab, metrics_tab = st.tabs(["Chat", "Evaluation Dashboard", "Metrics"])
+        with chat_tab:
+            _render_chat_experience(config)
+        with eval_tab:
+            render_evaluation_dashboard(str(getattr(config, "eval_store_path")))
+        with metrics_tab:
+            render_metrics_dashboard(str(getattr(config, "metrics_store_path")))
+    elif bool(getattr(config, "eval_mode", False)):
         chat_tab, eval_tab = st.tabs(["Chat", "Evaluation Dashboard"])
         with chat_tab:
             _render_chat_experience(config)
         with eval_tab:
             render_evaluation_dashboard(str(getattr(config, "eval_store_path")))
+    elif bool(getattr(config, "metrics_mode", False)):
+        chat_tab, metrics_tab = st.tabs(["Chat", "Metrics"])
+        with chat_tab:
+            _render_chat_experience(config)
+        with metrics_tab:
+            render_metrics_dashboard(str(getattr(config, "metrics_store_path")))
     else:
         _render_chat_experience(config)
 

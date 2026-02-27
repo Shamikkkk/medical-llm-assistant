@@ -17,37 +17,39 @@ def contextualize_question(
     user_query: str,
     chat_messages: list[dict[str, Any]],
     follow_up_mode: bool,
+    conversation_summary: str = "",
     llm: Any | None = None,
 ) -> tuple[str, str, bool]:
     """Return (effective_query, topic_summary, rewritten)."""
     query = str(user_query or "").strip()
     topic_summary = summarize_last_topic(chat_messages)
+    summary_hint = _merge_summary_hints(conversation_summary, topic_summary)
     if not query:
-        return query, topic_summary, False
+        return query, summary_hint, False
 
     history_excerpt = _history_excerpt(chat_messages)
     if not history_excerpt:
-        return query, topic_summary, False
+        return query, summary_hint, False
 
     should_contextualize = bool(follow_up_mode or _needs_contextualization(query))
     if not should_contextualize:
-        return query, topic_summary, False
+        return query, summary_hint, False
 
     last_user_question = _last_user_question(chat_messages)
     if llm is not None:
         rewritten = _rewrite_with_llm(
             query=query,
             history=history_excerpt,
-            topic_summary=topic_summary,
+            topic_summary=summary_hint,
             last_user_question=last_user_question,
             llm=llm,
         )
         if rewritten:
             LOGGER.info("[FOLLOWUP] rewritten_query='%s'", _trim(rewritten))
-            return rewritten, topic_summary, rewritten != query
+            return rewritten, summary_hint, rewritten != query
 
     # Heuristic fallback.
-    context_hint = topic_summary or last_user_question or history_excerpt[:180]
+    context_hint = summary_hint or last_user_question or history_excerpt[:180]
     if context_hint:
         rewritten = (
             f"{query} in the context of: {context_hint}. "
@@ -56,7 +58,7 @@ def contextualize_question(
     else:
         rewritten = query
     LOGGER.info("[FOLLOWUP] rewritten_query='%s' (heuristic)", _trim(rewritten))
-    return rewritten, topic_summary, rewritten != query
+    return rewritten, summary_hint, rewritten != query
 
 
 def summarize_last_topic(messages: list[dict[str, Any]], max_chars: int = 220) -> str:
@@ -173,3 +175,15 @@ def _last_user_question(messages: list[dict[str, Any]]) -> str:
         if text:
             return text[:220]
     return ""
+
+
+def _merge_summary_hints(conversation_summary: str, topic_summary: str, max_chars: int = 260) -> str:
+    rows = []
+    primary = " ".join(str(conversation_summary or "").split()).strip()
+    secondary = " ".join(str(topic_summary or "").split()).strip()
+    if primary:
+        rows.append(primary)
+    if secondary and secondary not in rows:
+        rows.append(secondary)
+    merged = " | ".join(rows).strip()
+    return merged[:max_chars]

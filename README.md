@@ -1,164 +1,130 @@
-# PubMed Literature Assistant (Conversational)
+# PubMed Literature Assistant
 
-This is a simple web app that helps you search **PubMed** using normal English questions and then gives you a concise, evidence-based response grounded in real PubMed abstracts.
+Streamlit application for biomedical literature Q&A grounded in PubMed abstracts.
 
-This assistant supports biomedical and health literature questions across specialties.
+## Local Run
 
----
-
-## What this app does
-
-1. You type a medical or public-health research question (example: "What is the evidence for temozolomide in glioblastoma?").
-2. The app converts your question into a PubMed-friendly search query.
-3. It pulls the most relevant PubMed abstracts.
-4. It summarizes what the abstracts collectively suggest and shows the sources (PMIDs).
-5. If you ask the same or a very similar question again, it can respond faster using its query cache.
-
----
-
-## Who is it for?
-
-- Medical students learning evidence-based medicine
-- Clinicians doing quick literature checks
-- Biomedical researchers doing hypothesis exploration or rapid review
-
----
-
-## How to run it (step-by-step)
-
-### 1) Install Python
-Make sure you have **Python 3.10+** installed.
-
-### 2) Download this project
-Place the project folder on your computer (for example, on Desktop).
-
-### 3) Create a virtual environment (recommended)
-Open a terminal in the project folder and run:
-
-```bash
-python -m venv .venv
-```
-
-Activate it:
-
-```bash
-# Windows (PowerShell)
-.venv\Scripts\Activate.ps1
-
-# macOS/Linux
-source .venv/bin/activate
-```
-
-### 4) Install dependencies
+1. Create and activate a virtual environment.
+2. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-This includes the in-app theme toggle component:
-- `streamlit-component-theme-changer`
-
-### 5) Set environment variables
-Copy the example env file and update it as needed:
+3. Create `.env` from the example file:
 
 ```bash
 cp .env.example .env
 ```
 
-At minimum, set:
-- `NVIDIA_API_KEY` (required for LLM-driven query rewriting and RAG answers)
-
-Optional:
-- `NVIDIA_MODEL` (defaults to `meta/llama-3.1-8b-instruct`)
-- `USE_RERANKER=true` (if you have Flashrank installed)
-
-### 6) Run the app
+4. Set `NVIDIA_API_KEY` if you want answer generation enabled.
+5. Start the app:
 
 ```bash
 streamlit run app.py
 ```
 
----
-
-## Notes
-
-- The app uses PubMed E-utilities and retrieves abstracts in real time.
-- Answers are grounded only in retrieved abstracts and include PMID citations.
-- If the NVIDIA key is missing, the app still retrieves papers but skips LLM-based answering.
-- In `AGENT_MODE=true`, the app runs a LangGraph-backed tool orchestrator.
-- In `EVAL_MODE=true`, the app runs online RAG evaluation sampling and stores results locally.
-- Use **Follow-up mode** to rewrite follow-up questions into standalone retrieval queries.
-- Use **Show papers** when you want ranked source links in the UI.  
-  With this toggle off, retrieval still grounds the answer but source link cards are hidden.
-- Source links include PubMed and DOI (if available). The app does not scrape DOI publisher pages.
-
----
-
-## Project structure
-
-- `app.py`: Streamlit entry point
-- `src/core/`: baseline RAG pipeline and chain logic
-- `src/agent/`: agent orchestrator and tool wrappers
-- `src/chat/`: follow-up contextualization and routing
-- `src/integrations/`: PubMed, Chroma, NVIDIA integrations
-- `src/ui/`: rendering/formatting helpers
-- `eval/`: evaluation runner, metrics, store, and dashboard helpers
-- `data/`: local persistence (Chroma vector stores)
-
----
-
-## Agent mode (optional)
-
-Enable in `.env`:
+## Tests
 
 ```bash
-AGENT_MODE=true
-AGENT_USE_LANGGRAPH=true
+pytest -q
 ```
 
-Behavior:
-- `AGENT_MODE=false` (default): existing baseline pipeline runs unchanged.
-- `AGENT_MODE=true`: an agent orchestrator routes tool calls for guardrails, query refinement, PubMed retrieval, retrieval, answer synthesis, and citation formatting.
-
----
-
-## Evaluation mode (optional)
-
-Enable in `.env`:
+Network smoke tests are opt-in:
 
 ```bash
-EVAL_MODE=true
-EVAL_SAMPLE_RATE=0.25
-EVAL_STORE_PATH=./data/eval/eval_results.jsonl
-OPENAI_API_KEY=<NVIDIA_API_KEY_FOR_OPENAI_COMPAT>
-OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
-# optional:
-RAGAS_JUDGE_MODEL=meta/llama-3.1-8b-instruct
+$env:RUN_NETWORK_TESTS="true"
+pytest -q tests/test_retrieval_smoke.py
 ```
 
-Behavior:
-- Runs online evaluation on sampled user turns.
-- Shows an **Evaluation Dashboard** tab in Streamlit.
-- Persists per-query metrics to JSONL.
-- RAGAS judge uses NVIDIA's OpenAI-compatible endpoint, so no OpenAI key is required.
-- If `OPENAI_API_KEY`/`OPENAI_BASE_URL` are missing or RAGAS errors, evaluation falls back to heuristic metrics.
+## Core Features
 
-### Offline evaluation
+- Process-level caching for embeddings, Chroma stores, and the NVIDIA chat client.
+- PubMed query TTL caching with negative-cache handling for empty search results.
+- Context budgeting with `MAX_ABSTRACTS` and `MAX_CONTEXT_TOKENS`.
+- Optional hybrid retrieval with lexical + semantic fusion.
+- Follow-up rewriting using rolling conversation summary memory.
+- Citation alignment disclaimers for unsupported answer sentences.
+- Structured JSON request logs and optional metrics dashboard.
+- Streamed answers with topic-aware thinking status, auto-scroll, and per-answer copy button.
 
-Use the template dataset:
+## Key Configuration
+
+Core:
+
+- `NVIDIA_API_KEY`: required for LLM answer generation.
+- `NVIDIA_MODEL`: generation model name.
+- `DATA_DIR`: root directory for Chroma persistence and local data.
+- `USE_RERANKER`: enables Flashrank reranking when available.
+- `LOG_PIPELINE`: enables detailed pipeline logs.
+
+Retrieval and context:
+
+- `PUBMED_CACHE_TTL_SECONDS`
+- `PUBMED_NEGATIVE_CACHE_TTL_SECONDS`
+- `MAX_ABSTRACTS`
+- `MAX_CONTEXT_TOKENS`
+- `CONTEXT_TRIM_STRATEGY=truncate|compress`
+- `HYBRID_RETRIEVAL=true|false`
+- `HYBRID_ALPHA`
+- `CITATION_ALIGNMENT=true|false`
+- `ALIGNMENT_MODE=disclaim|remove`
+
+UI:
+
+- `SHOW_REWRITTEN_QUERY`
+- `AUTO_SCROLL`
+
+Optional evaluation and metrics:
+
+- `EVAL_MODE`
+- `EVAL_SAMPLE_RATE`
+- `EVAL_STORE_PATH`
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
+- `RAGAS_JUDGE_MODEL`
+- `METRICS_MODE`
+- `METRICS_STORE_PATH`
+
+## Runtime Notes
+
+- If `NVIDIA_API_KEY` is missing, the app still performs retrieval but returns a configuration message instead of a generated answer.
+- If `EVAL_MODE=true`, startup validation requires `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
+- The sidebar controls expose `Top-N papers`, `Follow-up mode`, `Show papers`, `Show rewritten query`, and `Auto-scroll`.
+- `Show papers` only affects paper-link rendering. Retrieval and PMID-grounded answering still run when it is off.
+
+## Docker
+
+Build:
 
 ```bash
-python -m eval.run_offline --dataset data/eval_set.json --out data/eval/eval_results.jsonl
+docker build -t medical-llm-assistant .
 ```
 
-Run in agent mode:
+Run:
 
 ```bash
-python -m eval.run_offline --dataset data/eval_set.json --out data/eval/eval_results.jsonl --agent-mode
+docker run --rm -p 8501:8501 --env-file .env medical-llm-assistant
 ```
 
-### Smoke test
+The container healthcheck uses Streamlit's `/_stcore/health` endpoint.
 
-```bash
-python scripts/smoke_agent_eval.py
-```
+## CI
+
+GitHub Actions workflow: `.github/workflows/ci.yml`
+
+It runs:
+
+- `ruff check . --select E9,F63,F7,F82,F401`
+- `pytest -q`
+
+## Project Layout
+
+- `app.py`: Streamlit entrypoint.
+- `src/core/`: baseline retrieval and generation pipeline.
+- `src/chat/`: follow-up handling and request routing.
+- `src/integrations/`: PubMed, Chroma, and NVIDIA integrations.
+- `src/ui/`: Streamlit rendering helpers.
+- `src/observability/`: tracing and metrics helpers.
+- `eval/`: evaluation pipeline and dashboards.
+- `tests/`: unit and smoke tests.

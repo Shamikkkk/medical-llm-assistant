@@ -7,18 +7,37 @@ from uuid import uuid4
 import streamlit as st
 
 
-def init_state(default_top_n: int = 10) -> None:
+def init_state(
+    default_top_n: int = 10,
+    *,
+    default_show_papers: bool = False,
+    default_show_rewritten_query: bool = False,
+    default_auto_scroll: bool = True,
+    default_follow_up_mode: bool = True,
+) -> None:
     legacy_messages = list(st.session_state.get("messages", []))
     legacy_session = str(st.session_state.get("session_id", "") or uuid4())
 
     if "chats" not in st.session_state:
         st.session_state.chats = [
-            _new_chat_record(chat_id=legacy_session, messages=legacy_messages)
+            _new_chat_record(
+                chat_id=legacy_session,
+                messages=legacy_messages,
+                default_show_papers=default_show_papers,
+                default_show_rewritten_query=default_show_rewritten_query,
+                default_auto_scroll=default_auto_scroll,
+                default_follow_up_mode=default_follow_up_mode,
+            )
         ]
     else:
         for chat in st.session_state.chats:
             if "context_state" not in chat or not isinstance(chat.get("context_state"), dict):
-                chat["context_state"] = _default_context_state()
+                chat["context_state"] = _default_context_state(
+                    default_show_papers=default_show_papers,
+                    default_show_rewritten_query=default_show_rewritten_query,
+                    default_auto_scroll=default_auto_scroll,
+                    default_follow_up_mode=default_follow_up_mode,
+                )
 
     if "active_chat_id" not in st.session_state:
         st.session_state.active_chat_id = st.session_state.chats[-1]["chat_id"]
@@ -55,18 +74,30 @@ def set_active_messages(messages: list[dict]) -> None:
 
 def clear_active_messages() -> None:
     st.session_state.messages = []
-    st.session_state.context_state = _default_context_state()
+    current = get_active_context_state()
+    st.session_state.context_state = _default_context_state(
+        default_show_papers=bool(current.get("show_papers", False)),
+        default_show_rewritten_query=bool(current.get("show_rewritten_query", False)),
+        default_auto_scroll=bool(current.get("auto_scroll", True)),
+        default_follow_up_mode=bool(current.get("follow_up_mode", True)),
+    )
     _sync_active_messages()
 
 
 def new_chat() -> str:
     _sync_active_messages()
-    record = _new_chat_record()
+    current = get_active_context_state()
+    record = _new_chat_record(
+        default_show_papers=bool(current.get("show_papers", False)),
+        default_show_rewritten_query=bool(current.get("show_rewritten_query", False)),
+        default_auto_scroll=bool(current.get("auto_scroll", True)),
+        default_follow_up_mode=bool(current.get("follow_up_mode", True)),
+    )
     st.session_state.chats.append(record)
     st.session_state.active_chat_id = record["chat_id"]
     st.session_state.session_id = record["chat_id"]
     st.session_state.messages = []
-    st.session_state.context_state = _default_context_state()
+    st.session_state.context_state = dict(record["context_state"])
     return record["chat_id"]
 
 
@@ -127,18 +158,74 @@ def get_show_papers() -> bool:
     return bool(get_active_context_state().get("show_papers", False))
 
 
+def set_show_rewritten_query(enabled: bool) -> None:
+    update_active_context_state(show_rewritten_query=bool(enabled))
+
+
+def get_show_rewritten_query() -> bool:
+    return bool(get_active_context_state().get("show_rewritten_query", False))
+
+
+def set_auto_scroll(enabled: bool) -> None:
+    update_active_context_state(auto_scroll=bool(enabled))
+
+
+def get_auto_scroll() -> bool:
+    return bool(get_active_context_state().get("auto_scroll", True))
+
+
+def set_conversation_summary(summary: str) -> None:
+    update_active_context_state(conversation_summary=_clip_summary(summary))
+
+
+def get_conversation_summary() -> str:
+    return str(get_active_context_state().get("conversation_summary", "") or "")
+
+
+def update_conversation_summary(messages: list[dict] | None = None, *, max_chars: int = 320) -> str:
+    rows = messages if messages is not None else get_active_messages()
+    if not rows:
+        set_conversation_summary("")
+        return ""
+    fragments: list[str] = []
+    for message in rows[-4:]:
+        role = str(message.get("role", "") or "")
+        content = " ".join(str(message.get("content", "") or "").split()).strip()
+        if not content:
+            continue
+        label = "assistant" if role == "assistant" else "user"
+        fragments.append(f"{label}: {content}")
+    summary = " | ".join(fragments).strip()
+    summary = summary[:max_chars]
+    set_conversation_summary(summary)
+    return summary
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _new_chat_record(chat_id: str | None = None, messages: list[dict] | None = None) -> dict:
+def _new_chat_record(
+    chat_id: str | None = None,
+    messages: list[dict] | None = None,
+    *,
+    default_show_papers: bool = False,
+    default_show_rewritten_query: bool = False,
+    default_auto_scroll: bool = True,
+    default_follow_up_mode: bool = True,
+) -> dict:
     payload = list(messages or [])
     return {
         "chat_id": chat_id or str(uuid4()),
         "title": _derive_chat_title(payload),
         "created_at": _utc_now_iso(),
         "messages": payload,
-        "context_state": _default_context_state(),
+        "context_state": _default_context_state(
+            default_show_papers=default_show_papers,
+            default_show_rewritten_query=default_show_rewritten_query,
+            default_auto_scroll=default_auto_scroll,
+            default_follow_up_mode=default_follow_up_mode,
+        ),
     }
 
 
@@ -195,10 +282,23 @@ def _sanitize_top_n(value: Any) -> int:
     return max(1, min(10, parsed))
 
 
-def _default_context_state() -> dict:
+def _default_context_state(
+    *,
+    default_show_papers: bool = False,
+    default_show_rewritten_query: bool = False,
+    default_auto_scroll: bool = True,
+    default_follow_up_mode: bool = True,
+) -> dict:
     return {
-        "follow_up_mode": True,
-        "show_papers": False,
+        "follow_up_mode": bool(default_follow_up_mode),
+        "show_papers": bool(default_show_papers),
+        "show_rewritten_query": bool(default_show_rewritten_query),
+        "auto_scroll": bool(default_auto_scroll),
         "last_topic_summary": "",
+        "conversation_summary": "",
         "last_retrieved_sources": [],
     }
+
+
+def _clip_summary(summary: str, max_chars: int = 320) -> str:
+    return " ".join(str(summary or "").split())[:max_chars]

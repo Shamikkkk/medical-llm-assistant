@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
+from time import perf_counter
 from typing import Any, Dict, List, Mapping
+from uuid import uuid4
 import logging
 import re
 
 from src.core.chains import _format_docs, build_chat_chain, build_rag_chain
-from src.core.config import load_config
-from src.intent import classify_intent_details, smalltalk_reply
+from src.core.config import AppConfig, load_config
+from src.core.retrieval import (
+    align_answer_citations,
+    build_context_rows,
+    hybrid_rerank_documents,
+    select_context_documents,
+)
 from src.core.scope import ScopeResult, classify_scope
 from src.history import get_session_history
+from src.intent import classify_intent_details, smalltalk_reply
 from src.integrations.nvidia import get_nvidia_llm
 from src.integrations.pubmed import (
     pubmed_efetch,
@@ -17,13 +26,14 @@ from src.integrations.pubmed import (
     to_documents,
 )
 from src.integrations.storage import (
-    add_query_cache_entry,
     get_abstract_store,
     get_query_cache_store,
-    lookup_cached_query,
+    lookup_query_result_cache,
+    remember_query_result,
     upsert_abstracts,
 )
-from src.logging_utils import log_llm_usage
+from src.logging_utils import hash_query_text, log_event, log_llm_usage
+from src.observability.tracing import start_span
 from src.types import PipelineResponse, SourceItem
 from src.validators import validate_answer
 
@@ -53,229 +63,137 @@ PRONOUN_PATTERN = re.compile(
 )
 
 
+class _PipelineRetriever:
+    def __init__(
+        self,
+        *,
+        abstract_store: Any,
+        candidate_k: int,
+        final_k: int,
+        compressor: Any | None,
+        hybrid_retrieval: bool,
+        hybrid_alpha: float,
+        log_pipeline: bool,
+    ) -> None:
+        self._base_retriever = abstract_store.as_retriever(search_kwargs={"k": candidate_k})
+        self._compressor = compressor
+        self._hybrid_retrieval = bool(hybrid_retrieval)
+        self._hybrid_alpha = float(hybrid_alpha)
+        self._final_k = max(1, int(final_k))
+        self._log_pipeline = bool(log_pipeline)
+
+    def invoke(self, retrieval_query: str) -> list:
+        with start_span(
+            "chroma.query",
+            attributes={"retrieval_query_hash": hash_query_text(retrieval_query)},
+        ):
+            try:
+                docs = self._base_retriever.invoke(retrieval_query)
+            except Exception:
+                docs = []
+        docs_list = list(docs or []) if not isinstance(docs, list) else docs
+
+        if self._compressor is not None and docs_list:
+            with start_span("rerank", attributes={"stage": "flashrank"}):
+                try:
+                    docs_list = list(
+                        self._compressor.compress_documents(docs_list, query=retrieval_query)
+                    )
+                except Exception:
+                    docs_list = docs_list
+
+        if self._hybrid_retrieval and docs_list:
+            with start_span("rerank", attributes={"stage": "hybrid"}):
+                docs_list = hybrid_rerank_documents(
+                    retrieval_query,
+                    docs_list,
+                    alpha=self._hybrid_alpha,
+                    limit=self._final_k,
+                )
+        else:
+            docs_list = docs_list[: self._final_k]
+
+        _pipeline_log(
+            self._log_pipeline,
+            "[PIPELINE] Retriever invoke complete | docs=%s hybrid=%s",
+            len(docs_list),
+            self._hybrid_retrieval,
+        )
+        return docs_list
+
+    def get_relevant_documents(self, query: str) -> list:
+        return self.invoke(query)
+
+
 def run_pipeline(query: str) -> PipelineResponse:
     """Backwards-compatible wrapper for single-turn usage."""
     return invoke_chat(query, session_id="default", top_n=10)
 
 
-def invoke_chat(query: str, session_id: str, top_n: int = 10) -> PipelineResponse:
-    safe_top_n = _sanitize_top_n(top_n)
+def invoke_chat(
+    query: str,
+    session_id: str,
+    top_n: int = 10,
+    *,
+    request_id: str | None = None,
+    include_paper_links: bool = True,
+) -> PipelineResponse:
     config = load_config()
-    llm = _get_llm_safe()
-    intent = classify_intent_details(query, llm, log_enabled=config.log_pipeline)
-    intent_label = str(intent.get("label", "")).lower()
-    intent_confidence = float(intent.get("confidence", 0.0) or 0.0)
-    if intent_label == "smalltalk":
-        return {
-            "status": "smalltalk",
-            "answer": smalltalk_reply(query, llm=llm),
-            "query": query,
-            "sources": [],
-            "retrieved_contexts": [],
-            "intent_label": intent_label,
-            "intent_confidence": intent_confidence,
-        }
-
-    scope = classify_scope(query, session_id=session_id, llm=llm)
-    if not scope.allow:
-        return {
-            "status": "out_of_scope",
-            "message": scope.user_message,
-            "query": query,
-            "scope_label": scope.label,
-            "retrieved_contexts": [],
-            "intent_label": intent_label,
-            "intent_confidence": intent_confidence,
-        }
-
-    context = _prepare_chat_context(
-        query=query,
-        session_id=session_id,
-        top_n=safe_top_n,
-        llm=llm,
-        scope=scope,
-        config=config,
-    )
-    llm = context["llm"]
-
-    if llm is None:
-        return {
-            "status": "answered",
-            "answer": "LLM not configured. Set NVIDIA_API_KEY to enable contextual answers.",
-            "docs_preview": context["docs_preview"],
-            "pubmed_query": context["pubmed_query"],
-            "scope_label": scope.label,
-            "scope_message": scope.user_message,
-            "reframed_query": scope.reframed_query or "",
-            "query": query,
-            "sources": [],
-            "retrieved_contexts": [],
-            "intent_label": intent_label,
-            "intent_confidence": intent_confidence,
-        }
-
-    base_chain = build_rag_chain(llm, context["retriever"])
-    chat_chain = build_chat_chain(base_chain)
-
-    raw_answer = chat_chain.invoke(
-        {
-            "input": query,
-            "retrieval_query": context["retrieval_query"],
-        },
-        config={"configurable": {"session_id": session_id}},
-    )
-    log_llm_usage("answer.invoke", raw_answer)
-    answer = _extract_message_text(raw_answer)
-
-    retrieved_docs = _retrieve_docs_for_sources(
-        retriever=context["retriever"],
-        retrieval_query=context["retrieval_query"],
-    )
-    sources = _collect_sources_from_docs(retrieved_docs, top_n=safe_top_n)
-    retrieved_contexts = _docs_to_eval_contexts(retrieved_docs, top_n=safe_top_n)
-    validation_payload = _run_optional_validation(
-        config=config,
-        user_query=query,
-        answer=answer,
-        retrieved_docs=retrieved_docs,
-        sources=sources,
-    )
-
-    payload: PipelineResponse = {
-        "status": "answered",
-        "answer": answer,
-        "sources": sources,
-        "reranker_active": context["reranker_active"],
-        "pubmed_query": context["pubmed_query"],
-        "docs_preview": context["docs_preview"],
-        "scope_label": scope.label,
-        "scope_message": scope.user_message,
-        "reframed_query": scope.reframed_query or "",
-        "reframe_note": context.get("reframe_note", ""),
-        "query": query,
-        "intent_label": intent_label,
-        "intent_confidence": intent_confidence,
-        "retrieved_contexts": retrieved_contexts,
-    }
-    payload.update(validation_payload)
-    return payload
+    current_request_id = request_id or uuid4().hex
+    start_time = perf_counter()
+    try:
+        return _invoke_chat_impl(
+            query=query,
+            session_id=session_id,
+            top_n=top_n,
+            config=config,
+            request_id=current_request_id,
+            include_paper_links=include_paper_links,
+            start_time=start_time,
+        )
+    except Exception as exc:
+        _log_request_error(
+            config=config,
+            request_id=current_request_id,
+            session_id=session_id,
+            query=query,
+            started_at=start_time,
+            error=exc,
+        )
+        raise
 
 
-def stream_chat(query: str, session_id: str, top_n: int = 10):
-    safe_top_n = _sanitize_top_n(top_n)
+def stream_chat(
+    query: str,
+    session_id: str,
+    top_n: int = 10,
+    *,
+    request_id: str | None = None,
+    include_paper_links: bool = True,
+):
     config = load_config()
-    llm = _get_llm_safe()
-    intent = classify_intent_details(query, llm, log_enabled=config.log_pipeline)
-    intent_label = str(intent.get("label", "")).lower()
-    intent_confidence = float(intent.get("confidence", 0.0) or 0.0)
-    if intent_label == "smalltalk":
-        reply = smalltalk_reply(query, llm=llm)
-        yield reply
-        return {
-            "status": "smalltalk",
-            "answer": reply,
-            "query": query,
-            "sources": [],
-            "retrieved_contexts": [],
-            "intent_label": intent_label,
-            "intent_confidence": intent_confidence,
-        }
-
-    scope = classify_scope(query, session_id=session_id, llm=llm)
-    if not scope.allow:
-        yield scope.user_message
-        return {
-            "status": "out_of_scope",
-            "answer": scope.user_message,
-            "scope_label": scope.label,
-            "scope_message": scope.user_message,
-            "reframed_query": scope.reframed_query or "",
-            "query": query,
-            "sources": [],
-            "retrieved_contexts": [],
-            "intent_label": intent_label,
-            "intent_confidence": intent_confidence,
-        }
-
-    context = _prepare_chat_context(
-        query=query,
-        session_id=session_id,
-        top_n=safe_top_n,
-        llm=llm,
-        scope=scope,
-        config=config,
-    )
-    llm = context["llm"]
-
-    if llm is None:
-        fallback = "LLM not configured. Set NVIDIA_API_KEY to enable contextual answers."
-        yield fallback
-        return {
-            "status": "answered",
-            "answer": fallback,
-            "docs_preview": context["docs_preview"],
-            "pubmed_query": context["pubmed_query"],
-            "scope_label": scope.label,
-            "scope_message": scope.user_message,
-            "reframed_query": scope.reframed_query or "",
-            "query": query,
-            "sources": [],
-            "retrieved_contexts": [],
-            "intent_label": intent_label,
-            "intent_confidence": intent_confidence,
-        }
-
-    base_chain = build_rag_chain(llm, context["retriever"])
-    chat_chain = build_chat_chain(base_chain)
-
-    usage_candidate: Any | None = None
-    answer_text = ""
-    for chunk in chat_chain.stream(
-        {
-            "input": query,
-            "retrieval_query": context["retrieval_query"],
-        },
-        config={"configurable": {"session_id": session_id}},
-    ):
-        if _has_usage_metadata(chunk):
-            usage_candidate = chunk
-        text = _coerce_stream_chunk(chunk)
-        if text:
-            answer_text += text
-            yield text
-    log_llm_usage("answer.stream", usage_candidate)
-
-    retrieved_docs = _retrieve_docs_for_sources(
-        retriever=context["retriever"],
-        retrieval_query=context["retrieval_query"],
-    )
-    sources = _collect_sources_from_docs(retrieved_docs, top_n=safe_top_n)
-    retrieved_contexts = _docs_to_eval_contexts(retrieved_docs, top_n=safe_top_n)
-    validation_payload = _run_optional_validation(
-        config=config,
-        user_query=query,
-        answer=answer_text,
-        retrieved_docs=retrieved_docs,
-        sources=sources,
-    )
-    payload: PipelineResponse = {
-        "status": "answered",
-        "answer": answer_text,
-        "sources": sources,
-        "reranker_active": context["reranker_active"],
-        "pubmed_query": context["pubmed_query"],
-        "docs_preview": context["docs_preview"],
-        "scope_label": scope.label,
-        "scope_message": scope.user_message,
-        "reframed_query": scope.reframed_query or "",
-        "reframe_note": context.get("reframe_note", ""),
-        "query": query,
-        "intent_label": intent_label,
-        "intent_confidence": intent_confidence,
-        "retrieved_contexts": retrieved_contexts,
-    }
-    payload.update(validation_payload)
-    return payload
+    current_request_id = request_id or uuid4().hex
+    start_time = perf_counter()
+    try:
+        return (yield from _stream_chat_impl(
+            query=query,
+            session_id=session_id,
+            top_n=top_n,
+            config=config,
+            request_id=current_request_id,
+            include_paper_links=include_paper_links,
+            start_time=start_time,
+        ))
+    except Exception as exc:
+        _log_request_error(
+            config=config,
+            request_id=current_request_id,
+            session_id=session_id,
+            query=query,
+            started_at=start_time,
+            error=exc,
+        )
+        raise
 
 
 def build_contextual_retrieval_query(
@@ -306,8 +224,7 @@ def build_contextual_retrieval_query(
         )
         rewritten = _invoke_llm(llm, prompt, usage_tag="contextual_rewrite")
         if rewritten:
-            cleaned = _sanitize_query(rewritten, fallback=base_query)
-            return cleaned
+            return _sanitize_query(rewritten, fallback=base_query)
 
     snippet = _get_last_assistant_excerpt(session_id)
     if snippet:
@@ -316,29 +233,436 @@ def build_contextual_retrieval_query(
     return base_query
 
 
+def _invoke_chat_impl(
+    *,
+    query: str,
+    session_id: str,
+    top_n: int,
+    config: AppConfig,
+    request_id: str,
+    include_paper_links: bool,
+    start_time: float,
+) -> PipelineResponse:
+    safe_top_n = min(_sanitize_top_n(top_n), int(config.max_abstracts))
+    llm = _get_llm_safe(config)
+    intent = classify_intent_details(query, llm, log_enabled=config.log_pipeline)
+    intent_label = str(intent.get("label", "")).lower()
+    intent_confidence = float(intent.get("confidence", 0.0) or 0.0)
+    if intent_label == "smalltalk":
+        reply = smalltalk_reply(query, llm=llm)
+        payload: PipelineResponse = {
+            "status": "smalltalk",
+            "answer": reply,
+            "query": query,
+            "sources": [],
+            "retrieved_contexts": [],
+            "intent_label": intent_label,
+            "intent_confidence": intent_confidence,
+            "request_id": request_id,
+        }
+        _log_request_success(
+            config=config,
+            request_id=request_id,
+            session_id=session_id,
+            query=query,
+            payload=payload,
+            cache_hit=False,
+            retrieval_ms=0.0,
+            llm_ms=0.0,
+            total_ms=(perf_counter() - start_time) * 1000.0,
+            usage_stats={},
+        )
+        return payload
+
+    scope = classify_scope(query, session_id=session_id, llm=llm)
+    if not scope.allow:
+        payload = {
+            "status": "out_of_scope",
+            "message": scope.user_message,
+            "query": query,
+            "scope_label": scope.label,
+            "retrieved_contexts": [],
+            "intent_label": intent_label,
+            "intent_confidence": intent_confidence,
+            "request_id": request_id,
+        }
+        _log_request_success(
+            config=config,
+            request_id=request_id,
+            session_id=session_id,
+            query=query,
+            payload=payload,
+            cache_hit=False,
+            retrieval_ms=0.0,
+            llm_ms=0.0,
+            total_ms=(perf_counter() - start_time) * 1000.0,
+            usage_stats={},
+        )
+        return payload
+
+    context = _prepare_chat_context(
+        query=query,
+        session_id=session_id,
+        top_n=safe_top_n,
+        llm=llm,
+        scope=scope,
+        config=config,
+        request_id=request_id,
+    )
+    llm = context["llm"]
+
+    if llm is None:
+        payload = {
+            "status": "answered",
+            "answer": "LLM not configured. Set NVIDIA_API_KEY to enable contextual answers.",
+            "docs_preview": _filter_source_links(context["docs_preview"], include_paper_links),
+            "pubmed_query": context["pubmed_query"],
+            "scope_label": scope.label,
+            "scope_message": scope.user_message,
+            "reframed_query": scope.reframed_query or "",
+            "query": query,
+            "sources": [],
+            "retrieved_contexts": [],
+            "intent_label": intent_label,
+            "intent_confidence": intent_confidence,
+            "cache_hit": context["cache_hit"],
+            "request_id": request_id,
+        }
+        _log_request_success(
+            config=config,
+            request_id=request_id,
+            session_id=session_id,
+            query=query,
+            payload=payload,
+            cache_hit=context["cache_hit"],
+            retrieval_ms=float(context["retrieval_ms"]),
+            llm_ms=0.0,
+            total_ms=(perf_counter() - start_time) * 1000.0,
+            usage_stats={},
+        )
+        return payload
+
+    base_chain = build_rag_chain(
+        llm,
+        context["retriever"],
+        max_abstracts=config.max_abstracts,
+        max_context_tokens=config.max_context_tokens,
+        trim_strategy=config.context_trim_strategy,
+    )
+    chat_chain = build_chat_chain(base_chain)
+
+    llm_start = perf_counter()
+    with start_span("llm.generate", attributes={"request_id": request_id, "provider": "nvidia"}):
+        raw_answer = chat_chain.invoke(
+            {
+                "input": query,
+                "retrieval_query": context["retrieval_query"],
+            },
+            config={"configurable": {"session_id": session_id}},
+        )
+    usage_stats = log_llm_usage("answer.invoke", raw_answer)
+    llm_ms = (perf_counter() - llm_start) * 1000.0
+    answer = _extract_message_text(raw_answer)
+
+    retrieved_docs = _retrieve_docs_for_sources(
+        retriever=context["retriever"],
+        retrieval_query=context["retrieval_query"],
+    )
+    retrieved_contexts = _docs_to_eval_contexts(
+        retrieved_docs,
+        config=config,
+        top_n=safe_top_n,
+    )
+    if config.citation_alignment:
+        answer, alignment_issues = align_answer_citations(
+            answer,
+            contexts=retrieved_contexts,
+            mode=config.alignment_mode,
+        )
+    else:
+        alignment_issues = []
+    sources = _collect_sources_from_docs(
+        retrieved_docs,
+        top_n=safe_top_n,
+        include_paper_links=include_paper_links,
+    )
+    validation_payload = _run_optional_validation(
+        config=config,
+        user_query=query,
+        answer=answer,
+        retrieved_docs=retrieved_docs,
+        sources=sources,
+    )
+
+    payload: PipelineResponse = {
+        "status": "answered",
+        "answer": answer,
+        "sources": sources,
+        "reranker_active": context["reranker_active"],
+        "pubmed_query": context["pubmed_query"],
+        "docs_preview": _filter_source_links(context["docs_preview"], include_paper_links),
+        "scope_label": scope.label,
+        "scope_message": scope.user_message,
+        "reframed_query": scope.reframed_query or "",
+        "reframe_note": context.get("reframe_note", ""),
+        "query": query,
+        "intent_label": intent_label,
+        "intent_confidence": intent_confidence,
+        "retrieved_contexts": retrieved_contexts,
+        "cache_hit": context["cache_hit"],
+        "cache_status": context["cache_status"],
+        "request_id": request_id,
+    }
+    if alignment_issues:
+        payload["alignment_issues"] = alignment_issues
+    payload.update(validation_payload)
+    _log_request_success(
+        config=config,
+        request_id=request_id,
+        session_id=session_id,
+        query=query,
+        payload=payload,
+        cache_hit=context["cache_hit"],
+        retrieval_ms=float(context["retrieval_ms"]),
+        llm_ms=llm_ms,
+        total_ms=(perf_counter() - start_time) * 1000.0,
+        usage_stats=usage_stats,
+    )
+    return payload
+
+
+def _stream_chat_impl(
+    *,
+    query: str,
+    session_id: str,
+    top_n: int,
+    config: AppConfig,
+    request_id: str,
+    include_paper_links: bool,
+    start_time: float,
+):
+    safe_top_n = min(_sanitize_top_n(top_n), int(config.max_abstracts))
+    llm = _get_llm_safe(config)
+    intent = classify_intent_details(query, llm, log_enabled=config.log_pipeline)
+    intent_label = str(intent.get("label", "")).lower()
+    intent_confidence = float(intent.get("confidence", 0.0) or 0.0)
+    if intent_label == "smalltalk":
+        reply = smalltalk_reply(query, llm=llm)
+        yield reply
+        payload: PipelineResponse = {
+            "status": "smalltalk",
+            "answer": reply,
+            "query": query,
+            "sources": [],
+            "retrieved_contexts": [],
+            "intent_label": intent_label,
+            "intent_confidence": intent_confidence,
+            "request_id": request_id,
+        }
+        _log_request_success(
+            config=config,
+            request_id=request_id,
+            session_id=session_id,
+            query=query,
+            payload=payload,
+            cache_hit=False,
+            retrieval_ms=0.0,
+            llm_ms=0.0,
+            total_ms=(perf_counter() - start_time) * 1000.0,
+            usage_stats={},
+        )
+        return payload
+
+    scope = classify_scope(query, session_id=session_id, llm=llm)
+    if not scope.allow:
+        yield scope.user_message
+        payload = {
+            "status": "out_of_scope",
+            "answer": scope.user_message,
+            "scope_label": scope.label,
+            "scope_message": scope.user_message,
+            "reframed_query": scope.reframed_query or "",
+            "query": query,
+            "sources": [],
+            "retrieved_contexts": [],
+            "intent_label": intent_label,
+            "intent_confidence": intent_confidence,
+            "request_id": request_id,
+        }
+        _log_request_success(
+            config=config,
+            request_id=request_id,
+            session_id=session_id,
+            query=query,
+            payload=payload,
+            cache_hit=False,
+            retrieval_ms=0.0,
+            llm_ms=0.0,
+            total_ms=(perf_counter() - start_time) * 1000.0,
+            usage_stats={},
+        )
+        return payload
+
+    context = _prepare_chat_context(
+        query=query,
+        session_id=session_id,
+        top_n=safe_top_n,
+        llm=llm,
+        scope=scope,
+        config=config,
+        request_id=request_id,
+    )
+    llm = context["llm"]
+
+    if llm is None:
+        fallback = "LLM not configured. Set NVIDIA_API_KEY to enable contextual answers."
+        yield fallback
+        payload = {
+            "status": "answered",
+            "answer": fallback,
+            "docs_preview": _filter_source_links(context["docs_preview"], include_paper_links),
+            "pubmed_query": context["pubmed_query"],
+            "scope_label": scope.label,
+            "scope_message": scope.user_message,
+            "reframed_query": scope.reframed_query or "",
+            "query": query,
+            "sources": [],
+            "retrieved_contexts": [],
+            "intent_label": intent_label,
+            "intent_confidence": intent_confidence,
+            "cache_hit": context["cache_hit"],
+            "request_id": request_id,
+        }
+        _log_request_success(
+            config=config,
+            request_id=request_id,
+            session_id=session_id,
+            query=query,
+            payload=payload,
+            cache_hit=context["cache_hit"],
+            retrieval_ms=float(context["retrieval_ms"]),
+            llm_ms=0.0,
+            total_ms=(perf_counter() - start_time) * 1000.0,
+            usage_stats={},
+        )
+        return payload
+
+    base_chain = build_rag_chain(
+        llm,
+        context["retriever"],
+        max_abstracts=config.max_abstracts,
+        max_context_tokens=config.max_context_tokens,
+        trim_strategy=config.context_trim_strategy,
+    )
+    chat_chain = build_chat_chain(base_chain)
+
+    usage_candidate: Any | None = None
+    answer_text = ""
+    llm_start = perf_counter()
+    with start_span("llm.generate", attributes={"request_id": request_id, "provider": "nvidia"}):
+        for chunk in chat_chain.stream(
+            {
+                "input": query,
+                "retrieval_query": context["retrieval_query"],
+            },
+            config={"configurable": {"session_id": session_id}},
+        ):
+            if _has_usage_metadata(chunk):
+                usage_candidate = chunk
+            text = _coerce_stream_chunk(chunk)
+            if not text:
+                continue
+            answer_text += text
+            yield text
+    usage_stats = log_llm_usage("answer.stream", usage_candidate)
+    llm_ms = (perf_counter() - llm_start) * 1000.0
+
+    retrieved_docs = _retrieve_docs_for_sources(
+        retriever=context["retriever"],
+        retrieval_query=context["retrieval_query"],
+    )
+    retrieved_contexts = _docs_to_eval_contexts(
+        retrieved_docs,
+        config=config,
+        top_n=safe_top_n,
+    )
+    if config.citation_alignment:
+        answer_text, alignment_issues = align_answer_citations(
+            answer_text,
+            contexts=retrieved_contexts,
+            mode=config.alignment_mode,
+        )
+    else:
+        alignment_issues = []
+    sources = _collect_sources_from_docs(
+        retrieved_docs,
+        top_n=safe_top_n,
+        include_paper_links=include_paper_links,
+    )
+    validation_payload = _run_optional_validation(
+        config=config,
+        user_query=query,
+        answer=answer_text,
+        retrieved_docs=retrieved_docs,
+        sources=sources,
+    )
+    payload: PipelineResponse = {
+        "status": "answered",
+        "answer": answer_text,
+        "sources": sources,
+        "reranker_active": context["reranker_active"],
+        "pubmed_query": context["pubmed_query"],
+        "docs_preview": _filter_source_links(context["docs_preview"], include_paper_links),
+        "scope_label": scope.label,
+        "scope_message": scope.user_message,
+        "reframed_query": scope.reframed_query or "",
+        "reframe_note": context.get("reframe_note", ""),
+        "query": query,
+        "intent_label": intent_label,
+        "intent_confidence": intent_confidence,
+        "retrieved_contexts": retrieved_contexts,
+        "cache_hit": context["cache_hit"],
+        "cache_status": context["cache_status"],
+        "request_id": request_id,
+    }
+    if alignment_issues:
+        payload["alignment_issues"] = alignment_issues
+    payload.update(validation_payload)
+    _log_request_success(
+        config=config,
+        request_id=request_id,
+        session_id=session_id,
+        query=query,
+        payload=payload,
+        cache_hit=context["cache_hit"],
+        retrieval_ms=float(context["retrieval_ms"]),
+        llm_ms=llm_ms,
+        total_ms=(perf_counter() - start_time) * 1000.0,
+        usage_stats=usage_stats,
+    )
+    return payload
+
+
 def _prepare_chat_context(
+    *,
     query: str,
     session_id: str,
     top_n: int,
     llm: Any | None = None,
     scope: ScopeResult | None = None,
-    config: Any | None = None,
+    config: AppConfig | None = None,
+    request_id: str = "",
+    executor_factory=ThreadPoolExecutor,
 ) -> Dict[str, Any]:
     config = config or load_config()
     persist_dir = str(config.data_dir / "chroma")
-    cache_store = get_query_cache_store(persist_dir)
-    abstract_store = get_abstract_store(persist_dir)
     log_pipeline = bool(getattr(config, "log_pipeline", False))
-
-    _pipeline_log(
-        log_pipeline,
-        "[PIPELINE] Query start | query='%s' top_n=%s session_id=%s",
-        _trim_text(query),
-        top_n,
-        session_id,
+    effective_top_n = min(int(top_n), int(config.max_abstracts))
+    cache_ttl_seconds = int(getattr(config, "pubmed_cache_ttl_seconds", 604800))
+    negative_cache_ttl_seconds = int(
+        getattr(config, "pubmed_negative_cache_ttl_seconds", 3600)
     )
-
-    llm = llm or _get_llm_safe()
+    llm = llm or _get_llm_safe(config)
     scope = scope or ScopeResult(
         label="BIOMEDICAL",
         allow=True,
@@ -347,55 +671,71 @@ def _prepare_chat_context(
         reason="default",
     )
 
-    pubmed_query = scope.reframed_query or query
-    pmids: List[str] = []
-    records: List[Dict[str, Any]] = []
-    documents = []
+    start = perf_counter()
+    _pipeline_log(
+        log_pipeline,
+        "[PIPELINE] Query start | query_hash=%s top_n=%s session_id=%s request_id=%s",
+        hash_query_text(query)[:12],
+        effective_top_n,
+        session_id,
+        request_id,
+    )
 
-    cached = lookup_cached_query(cache_store, query)
-    use_cache = False
-    if cached and scope.reframed_query is None:
-        use_cache = True
-    elif cached and scope.reframed_query:
-        cached_query = cached.get("pubmed_query") or ""
-        if cached_query and cached_query == scope.reframed_query:
+    with executor_factory(max_workers=3) as executor:
+        cache_future = executor.submit(get_query_cache_store, persist_dir)
+        abstract_future = executor.submit(get_abstract_store, persist_dir)
+
+        cache_store = cache_future.result()
+        abstract_store = abstract_future.result()
+        reranker_future = executor.submit(_prepare_reranker_resources, bool(config.use_reranker))
+
+        pubmed_query = scope.reframed_query or query
+        cache_payload = lookup_query_result_cache(
+            query,
+            store=cache_store,
+            ttl_seconds=cache_ttl_seconds,
+            negative_ttl_seconds=negative_cache_ttl_seconds,
+        )
+        use_cache = False
+        if cache_payload and scope.reframed_query is None:
             use_cache = True
+        elif cache_payload and scope.reframed_query:
+            cached_query = str(cache_payload.get("pubmed_query", "") or "")
+            if cached_query and cached_query == scope.reframed_query:
+                use_cache = True
 
-    if use_cache:
-        pubmed_query = cached.get("pubmed_query") or pubmed_query
-        pmids = [str(pmid) for pmid in (cached.get("pmids") or [])][:top_n]
-        if pmids:
-            records = pubmed_efetch(pmids)
+        if use_cache:
+            pubmed_query = str(cache_payload.get("pubmed_query") or pubmed_query)
+            pmids = [str(pmid) for pmid in (cache_payload.get("pmids") or [])][:effective_top_n]
+            with start_span(
+                "pubmed.retrieve",
+                attributes={"request_id": request_id, "cache_hit": True},
+            ):
+                records = pubmed_efetch(pmids) if pmids else []
             documents = to_documents(records)
-        _pipeline_log(
-            log_pipeline,
-            "[PIPELINE] Cache HIT | query='%s' pubmed_query='%s' cached_pmids=%s records=%s documents=%s",
-            _trim_text(query),
-            _trim_text(pubmed_query),
-            len(pmids),
-            len(records),
-            len(documents),
-        )
-    else:
-        if scope.reframed_query:
-            pubmed_query = scope.reframed_query
+            cache_status = "hit"
         else:
-            pubmed_query = rewrite_to_pubmed_query(query, llm)
-        pmids = pubmed_esearch(pubmed_query, retmax=top_n)
-        records = pubmed_efetch(pmids)
-        documents = to_documents(records)
-        add_query_cache_entry(cache_store, query, pubmed_query=pubmed_query, pmids=pmids)
-        _pipeline_log(
-            log_pipeline,
-            "[PIPELINE] Cache MISS | query='%s' pubmed_query='%s' esearch_pmids=%s efetch_records=%s documents=%s",
-            _trim_text(query),
-            _trim_text(pubmed_query),
-            len(pmids),
-            len(records),
-            len(documents),
-        )
+            if scope.reframed_query:
+                pubmed_query = scope.reframed_query
+            else:
+                pubmed_query = rewrite_to_pubmed_query(query, llm)
+            fetch_future: Future[tuple[list[str], list[dict[str, Any]], list[Any]]] = executor.submit(
+                _fetch_pubmed_records,
+                pubmed_query,
+                effective_top_n,
+                request_id,
+            )
+            pmids, records, documents = fetch_future.result()
+            remember_query_result(
+                query,
+                pubmed_query=pubmed_query,
+                pmids=pmids,
+                store=cache_store,
+            )
+            cache_status = "miss"
 
-    embedded_count = 0
+        reranker_resources = reranker_future.result()
+
     if documents:
         embedded_count = upsert_abstracts(
             abstract_store,
@@ -405,37 +745,47 @@ def _prepare_chat_context(
             log_pipeline=log_pipeline,
         )
     else:
+        embedded_count = 0
         _pipeline_log(
             log_pipeline,
-            "[PIPELINE] Embedding skipped | reason=no_documents query='%s'",
-            _trim_text(query),
+            "[PIPELINE] Embedding skipped | reason=no_documents query_hash=%s",
+            hash_query_text(query)[:12],
         )
 
     if scope.reframed_query:
         retrieval_query = scope.reframed_query
     else:
         retrieval_query = build_contextual_retrieval_query(
-            query, session_id, llm=llm, base_query=pubmed_query
+            query,
+            session_id,
+            llm=llm,
+            base_query=pubmed_query,
         )
 
     retriever, reranker_active = _build_retriever(
         abstract_store=abstract_store,
-        top_n=top_n,
-        use_reranker=config.use_reranker,
+        top_n=effective_top_n,
+        use_reranker=bool(config.use_reranker),
+        hybrid_retrieval=bool(config.hybrid_retrieval),
+        hybrid_alpha=float(config.hybrid_alpha),
         log_pipeline=log_pipeline,
+        reranker_resources=reranker_resources,
     )
 
     reframe_note = ""
     if scope.reframed_query and scope.user_message != "ok":
         reframe_note = scope.user_message
 
+    retrieval_ms = (perf_counter() - start) * 1000.0
     _pipeline_log(
         log_pipeline,
-        "[PIPELINE] Retrieval config | retriever_k=%s reranker_active=%s abstracts_fetched=%s abstracts_embedded=%s",
-        top_n,
+        "[PIPELINE] Retrieval config | retriever_k=%s reranker_active=%s cache=%s abstracts_fetched=%s abstracts_embedded=%s retrieval_ms=%.2f",
+        effective_top_n,
         reranker_active,
+        cache_status,
         len(records),
         embedded_count,
+        retrieval_ms,
     )
 
     return {
@@ -445,11 +795,41 @@ def _prepare_chat_context(
         "pubmed_query": pubmed_query,
         "retrieval_query": retrieval_query,
         "reframe_note": reframe_note,
-        "docs_preview": _build_docs_preview(records, top_n=top_n),
-        "cache_status": "hit" if use_cache else "miss",
+        "docs_preview": _build_docs_preview(records, top_n=effective_top_n),
+        "cache_status": cache_status,
+        "cache_hit": cache_status == "hit",
         "abstracts_fetched": len(records),
         "abstracts_embedded": embedded_count,
+        "retrieval_ms": retrieval_ms,
     }
+
+
+def _fetch_pubmed_records(
+    pubmed_query: str,
+    top_n: int,
+    request_id: str,
+) -> tuple[list[str], list[dict[str, Any]], list[Any]]:
+    with start_span(
+        "pubmed.retrieve",
+        attributes={"request_id": request_id, "pubmed_query_hash": hash_query_text(pubmed_query)},
+    ):
+        pmids = pubmed_esearch(pubmed_query, retmax=top_n)
+        records = pubmed_efetch(pmids)
+    documents = to_documents(records)
+    return pmids, records, documents
+
+
+def _prepare_reranker_resources(use_reranker: bool):
+    if not use_reranker:
+        return None
+    try:
+        from langchain_community.document_compressors import FlashrankRerank
+    except Exception:
+        return None
+    try:
+        return FlashrankRerank()
+    except Exception:
+        return None
 
 
 def _build_docs_preview(records: List[Dict[str, Any]], top_n: int) -> List[SourceItem]:
@@ -460,26 +840,22 @@ def _build_docs_preview(records: List[Dict[str, Any]], top_n: int) -> List[Sourc
         if not pmid or pmid in seen:
             continue
         seen.add(pmid)
-        items.append(
-            {
-                "rank": len(items) + 1,
-                "pmid": pmid,
-                "title": str(record.get("title", "") or ""),
-                "year": str(record.get("year", "") or ""),
-                "journal": str(record.get("journal", "") or ""),
-                "doi": str(record.get("doi", "") or ""),
-                "pmcid": str(record.get("pmcid", "") or ""),
-                "fulltext_url": str(record.get("fulltext_url", "") or ""),
-            }
-        )
+        item: SourceItem = {
+            "rank": len(items) + 1,
+            "pmid": pmid,
+            "title": str(record.get("title", "") or ""),
+            "year": str(record.get("year", "") or ""),
+            "journal": str(record.get("journal", "") or ""),
+            "doi": str(record.get("doi", "") or ""),
+            "fulltext_url": str(record.get("fulltext_url", "") or ""),
+        }
+        pmcid = str(record.get("pmcid", "") or "").strip()
+        if pmcid:
+            item["pmcid"] = pmcid
+        items.append(item)
         if len(items) >= top_n:
             break
     return items
-
-
-def _collect_sources(retriever, retrieval_query: str, top_n: int) -> List[SourceItem]:
-    docs = _retrieve_docs_for_sources(retriever=retriever, retrieval_query=retrieval_query)
-    return _collect_sources_from_docs(docs, top_n=top_n)
 
 
 def _retrieve_docs_for_sources(retriever, retrieval_query: str) -> list:
@@ -492,80 +868,82 @@ def _retrieve_docs_for_sources(retriever, retrieval_query: str) -> list:
     return docs
 
 
-def _collect_sources_from_docs(docs: list, top_n: int) -> List[SourceItem]:
+def _collect_sources_from_docs(
+    docs: list,
+    *,
+    top_n: int,
+    include_paper_links: bool,
+) -> List[SourceItem]:
     sources: list[SourceItem] = []
     seen_pmids: set[str] = set()
-    for doc in docs:
-        meta = doc.metadata or {}
+    for doc in select_context_documents(docs, max_abstracts=top_n):
+        meta = getattr(doc, "metadata", {}) or {}
         pmid = str(meta.get("pmid", "")).strip()
         if not pmid or pmid in seen_pmids:
             continue
-        sources.append(
-            {
-                "rank": len(sources) + 1,
-                "pmid": pmid,
-                "title": str(meta.get("title", "") or ""),
-                "journal": str(meta.get("journal", "") or ""),
-                "year": str(meta.get("year", "") or ""),
-                "doi": str(meta.get("doi", "") or ""),
-                "pmcid": str(meta.get("pmcid", "") or ""),
-                "fulltext_url": str(meta.get("fulltext_url", "") or ""),
-            }
-        )
+        item: SourceItem = {
+            "rank": len(sources) + 1,
+            "pmid": pmid,
+            "title": str(meta.get("title", "") or ""),
+            "journal": str(meta.get("journal", "") or ""),
+            "year": str(meta.get("year", "") or ""),
+        }
+        if include_paper_links:
+            item["doi"] = str(meta.get("doi", "") or "")
+            item["fulltext_url"] = str(meta.get("fulltext_url", "") or "")
+            pmcid = str(meta.get("pmcid", "") or "").strip()
+            if pmcid:
+                item["pmcid"] = pmcid
+        sources.append(item)
         seen_pmids.add(pmid)
         if len(sources) >= top_n:
             break
     return sources
 
 
-def _docs_to_eval_contexts(docs: list, top_n: int) -> list[dict[str, str]]:
-    contexts: list[dict[str, str]] = []
-    seen_pmids: set[str] = set()
-    for doc in docs:
-        metadata = getattr(doc, "metadata", {}) or {}
-        pmid = str(metadata.get("pmid", "") or "").strip()
-        if pmid and pmid in seen_pmids:
-            continue
-        if pmid:
-            seen_pmids.add(pmid)
-        contexts.append(
-            {
-                "pmid": pmid,
-                "title": str(metadata.get("title", "") or ""),
-                "journal": str(metadata.get("journal", "") or ""),
-                "year": str(metadata.get("year", "") or ""),
-                "context": str(getattr(doc, "page_content", "") or "")[:4000],
-            }
-        )
-        if len(contexts) >= top_n:
-            break
-    return contexts
+def _docs_to_eval_contexts(
+    docs: list,
+    *,
+    config: AppConfig,
+    top_n: int,
+) -> list[dict[str, str]]:
+    return build_context_rows(
+        select_context_documents(docs, max_abstracts=min(top_n, config.max_abstracts)),
+        max_abstracts=min(top_n, config.max_abstracts),
+        max_context_tokens=config.max_context_tokens,
+        trim_strategy=config.context_trim_strategy,
+    )
 
 
-def _build_retriever(abstract_store, top_n: int, use_reranker: bool, log_pipeline: bool = False):
-    base_retriever = abstract_store.as_retriever(search_kwargs={"k": top_n})
+def _build_retriever(
+    *,
+    abstract_store: Any,
+    top_n: int,
+    use_reranker: bool,
+    hybrid_retrieval: bool,
+    hybrid_alpha: float,
+    log_pipeline: bool = False,
+    reranker_resources: Any | None = None,
+):
+    candidate_k = max(top_n, min(20, top_n * 2 if hybrid_retrieval else top_n))
+    retriever = _PipelineRetriever(
+        abstract_store=abstract_store,
+        candidate_k=candidate_k,
+        final_k=top_n,
+        compressor=reranker_resources if use_reranker else None,
+        hybrid_retrieval=hybrid_retrieval,
+        hybrid_alpha=hybrid_alpha,
+        log_pipeline=log_pipeline,
+    )
     _pipeline_log(
         log_pipeline,
-        "[PIPELINE] Built base retriever with k=%s",
+        "[PIPELINE] Built retriever | candidate_k=%s final_k=%s hybrid=%s reranker=%s",
+        candidate_k,
         top_n,
+        hybrid_retrieval,
+        reranker_resources is not None,
     )
-    if not use_reranker:
-        return base_retriever, False
-
-    try:
-        from langchain.retrievers import ContextualCompressionRetriever
-        from langchain_community.document_compressors import FlashrankRerank
-
-        compressor = FlashrankRerank()
-        reranker = ContextualCompressionRetriever(
-            base_compressor=compressor,
-            base_retriever=base_retriever,
-        )
-        _pipeline_log(log_pipeline, "[PIPELINE] Reranker active: FlashrankRerank")
-        return reranker, True
-    except Exception:
-        _pipeline_log(log_pipeline, "[PIPELINE] Reranker unavailable; falling back to base retriever")
-        return base_retriever, False
+    return retriever, bool(reranker_resources is not None and use_reranker)
 
 
 def _sanitize_top_n(top_n: int) -> int:
@@ -576,8 +954,10 @@ def _sanitize_top_n(top_n: int) -> int:
     return max(1, min(10, value))
 
 
-def _get_llm_safe():
+def _get_llm_safe(config: AppConfig | None = None):
     try:
+        if config is not None:
+            return get_nvidia_llm(model_name=config.nvidia_model, api_key=config.nvidia_api_key)
         return get_nvidia_llm()
     except Exception:
         return None
@@ -691,7 +1071,7 @@ def _invoke_llm(llm: Any, prompt: str, usage_tag: str | None = None) -> str | No
 
 def _run_optional_validation(
     *,
-    config: Any,
+    config: AppConfig,
     user_query: str,
     answer: str,
     retrieved_docs: list,
@@ -702,7 +1082,16 @@ def _run_optional_validation(
     if not answer.strip():
         return {}
 
-    context = _format_docs(retrieved_docs) if retrieved_docs else ""
+    context = (
+        _format_docs(
+            retrieved_docs,
+            max_abstracts=config.max_abstracts,
+            max_context_tokens=config.max_context_tokens,
+            trim_strategy=config.context_trim_strategy,
+        )
+        if retrieved_docs
+        else ""
+    )
     source_pmids = [str(item.get("pmid", "")).strip() for item in sources if item.get("pmid")]
     result = validate_answer(
         user_query=user_query,
@@ -764,6 +1153,73 @@ def _sanitize_query(text: str, fallback: str) -> str:
     if len(cleaned) > 300:
         cleaned = cleaned[:300].rstrip()
     return cleaned or fallback
+
+
+def _filter_source_links(items: list[dict[str, Any]], include_paper_links: bool) -> list[dict[str, Any]]:
+    if include_paper_links:
+        return [dict(item) for item in items]
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        copy = dict(item)
+        copy.pop("doi", None)
+        copy.pop("pmcid", None)
+        copy.pop("fulltext_url", None)
+        filtered.append(copy)
+    return filtered
+
+
+def _log_request_success(
+    *,
+    config: AppConfig,
+    request_id: str,
+    session_id: str,
+    query: str,
+    payload: Mapping[str, Any],
+    cache_hit: bool,
+    retrieval_ms: float,
+    llm_ms: float,
+    total_ms: float,
+    usage_stats: Mapping[str, Any],
+) -> None:
+    log_event(
+        "request.complete",
+        request_id=request_id,
+        session_id=session_id,
+        query_hash=hash_query_text(query),
+        status=str(payload.get("status", "")),
+        provider="nvidia" if config.nvidia_api_key else None,
+        cache_hit=cache_hit,
+        pmid_count=len(payload.get("sources", []) or []),
+        retrieval_ms=round(retrieval_ms, 3),
+        llm_ms=round(llm_ms, 3),
+        total_ms=round(total_ms, 3),
+        prompt_tokens=usage_stats.get("prompt_tokens"),
+        completion_tokens=usage_stats.get("completion_tokens"),
+        total_tokens=usage_stats.get("total_tokens"),
+        store_path=str(config.metrics_store_path) if config.metrics_mode else None,
+    )
+
+
+def _log_request_error(
+    *,
+    config: AppConfig,
+    request_id: str,
+    session_id: str,
+    query: str,
+    started_at: float,
+    error: Exception,
+) -> None:
+    log_event(
+        "request.error",
+        request_id=request_id,
+        session_id=session_id,
+        query_hash=hash_query_text(query),
+        error_type=error.__class__.__name__,
+        error_message=str(error),
+        total_ms=round((perf_counter() - started_at) * 1000.0, 3),
+        provider="nvidia" if config.nvidia_api_key else None,
+        store_path=str(config.metrics_store_path) if config.metrics_mode else None,
+    )
 
 
 def _pipeline_log(enabled: bool, message: str, *args: Any) -> None:
