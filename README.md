@@ -98,13 +98,13 @@ Optional evaluation and metrics:
 Build:
 
 ```bash
-docker build -t medical-llm-assistant .
+docker build -t medical-llm-assistant:latest .
 ```
 
 Run:
 
 ```bash
-docker run --rm -p 8501:8501 --env-file .env medical-llm-assistant
+docker run --rm -p 8501:8501 --env-file .env medical-llm-assistant:latest
 ```
 
 The container healthcheck uses Streamlit's `/_stcore/health` endpoint.
