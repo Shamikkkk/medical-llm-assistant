@@ -3,7 +3,6 @@ from __future__ import annotations
 from hashlib import sha1
 import logging
 from pathlib import Path
-from typing import Any
 
 from langchain_core.documents import Document
 from langchain_community.embeddings import SentenceTransformerEmbeddings

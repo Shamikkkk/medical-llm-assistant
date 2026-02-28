@@ -3,7 +3,6 @@ from __future__ import annotations
 from functools import lru_cache
 import math
 import re
-from typing import Any
 
 from langchain_core.documents import Document
 
