@@ -22,6 +22,7 @@ class QueryCacheInsertTests(TestCase):
         self.assertNotIn("pmids", doc.metadata)
         self.assertNotIn("pmids_json", doc.metadata)
         self.assertNotIn("pmids_csv", doc.metadata)
+        self.assertEqual(doc.metadata.get("requested_retmax"), 0)
 
     def test_add_query_cache_entry_skips_empty_pmids(self) -> None:
         from src.integrations.storage import add_query_cache_entry
@@ -63,6 +64,26 @@ class QueryCacheInsertTests(TestCase):
         self.assertNotIn("pmids", doc.metadata)
         self.assertEqual(json.loads(doc.metadata.get("pmids_json", "")), ["123", "456"])
         self.assertEqual(doc.metadata.get("pmids_csv"), "123,456")
+        self.assertEqual(json.loads(doc.metadata.get("pmids_up_to_50_json", "")), ["123", "456"])
+        self.assertEqual(doc.metadata.get("pmids_up_to_50_csv"), "123,456")
+        self.assertEqual(doc.metadata.get("requested_retmax"), 2)
+
+    def test_build_query_cache_document_caps_stored_pmids_at_fifty(self) -> None:
+        from src.integrations.storage import build_query_cache_document
+
+        pmids = [str(40000 + index) for index in range(60)]
+        doc = build_query_cache_document(
+            "smoking cessation evidence",
+            "smoking cessation evidence",
+            pmids,
+            requested_retmax=60,
+        )
+
+        stored_pmids = json.loads(doc.metadata.get("pmids_up_to_50_json", "[]"))
+        self.assertEqual(len(stored_pmids), 50)
+        self.assertEqual(stored_pmids[0], "40000")
+        self.assertEqual(stored_pmids[-1], "40049")
+        self.assertEqual(doc.metadata.get("requested_retmax"), 60)
 
     def test_sanitize_metadata_serializes_nested_values(self) -> None:
         from src.integrations.storage import sanitize_metadata
@@ -148,3 +169,26 @@ class QueryCacheInsertTests(TestCase):
         )
 
         self.assertEqual(pmids, ["41758246", "12345678"])
+
+    def test_extract_pmids_prefers_pmids_up_to_fifty_metadata(self) -> None:
+        from src.integrations.storage import _extract_pmids_from_payload
+
+        pmids = _extract_pmids_from_payload(
+            {
+                "pmids_json": "[\"legacy-1\"]",
+                "pmids_up_to_50_json": json.dumps([str(50000 + index) for index in range(3)]),
+            }
+        )
+
+        self.assertEqual(pmids, ["50000", "50001", "50002"])
+
+    def test_clear_store_documents_deletes_all_ids(self) -> None:
+        from src.integrations.storage import clear_store_documents
+
+        store = Mock()
+        store.get.return_value = {"ids": ["doc-1", "doc-2"]}
+
+        cleared = clear_store_documents(store)
+
+        self.assertEqual(cleared, 2)
+        store.delete.assert_called_once_with(ids=["doc-1", "doc-2"])

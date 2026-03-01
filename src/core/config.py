@@ -41,6 +41,7 @@ class AppConfig:
     pubmed_cache_ttl_seconds: int
     pubmed_negative_cache_ttl_seconds: int
     max_abstracts: int
+    max_context_abstracts: int
     max_context_tokens: int
     context_trim_strategy: str
     hybrid_retrieval: bool
@@ -49,6 +50,9 @@ class AppConfig:
     alignment_mode: str
     show_rewritten_query: bool
     auto_scroll: bool
+    answer_cache_ttl_seconds: int
+    answer_cache_min_similarity: float
+    answer_cache_strict_fingerprint: bool
     metrics_mode: bool
     metrics_store_path: Path
     config_errors: tuple[str, ...]
@@ -71,6 +75,7 @@ class AppConfig:
             "pubmed_cache_ttl_seconds": self.pubmed_cache_ttl_seconds,
             "pubmed_negative_cache_ttl_seconds": self.pubmed_negative_cache_ttl_seconds,
             "max_abstracts": self.max_abstracts,
+            "max_context_abstracts": self.max_context_abstracts,
             "max_context_tokens": self.max_context_tokens,
             "context_trim_strategy": self.context_trim_strategy,
             "hybrid_retrieval": self.hybrid_retrieval,
@@ -79,6 +84,9 @@ class AppConfig:
             "alignment_mode": self.alignment_mode,
             "show_rewritten_query": self.show_rewritten_query,
             "auto_scroll": self.auto_scroll,
+            "answer_cache_ttl_seconds": self.answer_cache_ttl_seconds,
+            "answer_cache_min_similarity": self.answer_cache_min_similarity,
+            "answer_cache_strict_fingerprint": self.answer_cache_strict_fingerprint,
             "metrics_mode": self.metrics_mode,
             "metrics_store_path": str(self.metrics_store_path),
             "config_errors": list(self.config_errors),
@@ -136,7 +144,26 @@ def load_config() -> AppConfig:
     pubmed_negative_cache_ttl_seconds = _parse_int(
         os.getenv("PUBMED_NEGATIVE_CACHE_TTL_SECONDS"), default=3600
     )
-    max_abstracts = _parse_int(os.getenv("MAX_ABSTRACTS"), default=8)
+    legacy_max_abstracts_raw = os.getenv("MAX_ABSTRACTS")
+    max_context_abstracts_raw = os.getenv("MAX_CONTEXT_ABSTRACTS")
+    if max_context_abstracts_raw is not None:
+        max_context_abstracts = _parse_int(max_context_abstracts_raw, default=8)
+        if legacy_max_abstracts_raw is not None:
+            config_note = (
+                "MAX_ABSTRACTS is deprecated and is treated as a legacy alias for MAX_CONTEXT_ABSTRACTS. "
+                "Using MAX_CONTEXT_ABSTRACTS."
+            )
+            config_warnings = [config_note]
+        else:
+            config_warnings = []
+    else:
+        max_context_abstracts = _parse_int(legacy_max_abstracts_raw, default=8)
+        config_warnings = []
+        if legacy_max_abstracts_raw is not None:
+            config_warnings.append(
+                "MAX_ABSTRACTS is deprecated. Treating it as MAX_CONTEXT_ABSTRACTS (prompt context budget)."
+            )
+    max_abstracts = max_context_abstracts
     max_context_tokens = _parse_int(os.getenv("MAX_CONTEXT_TOKENS"), default=2500)
     context_trim_strategy = (
         os.getenv("CONTEXT_TRIM_STRATEGY", "truncate").strip().lower() or "truncate"
@@ -147,13 +174,24 @@ def load_config() -> AppConfig:
     alignment_mode = os.getenv("ALIGNMENT_MODE", "disclaim").strip().lower() or "disclaim"
     show_rewritten_query = _parse_bool(os.getenv("SHOW_REWRITTEN_QUERY", "false"))
     auto_scroll = _parse_bool(os.getenv("AUTO_SCROLL", "true"))
+    answer_cache_ttl_seconds = _parse_int(
+        os.getenv("ANSWER_CACHE_TTL_SECONDS"),
+        default=604800,
+    )
+    answer_cache_min_similarity = _parse_float(
+        os.getenv("ANSWER_CACHE_MIN_SIMILARITY"),
+        default=0.9,
+    )
+    answer_cache_strict_fingerprint = _parse_bool(
+        os.getenv("ANSWER_CACHE_STRICT_FINGERPRINT", "true")
+    )
     metrics_mode = _parse_bool(os.getenv("METRICS_MODE", "false"))
     metrics_store_path = Path(
         os.getenv("METRICS_STORE_PATH", "./data/metrics/events.jsonl")
     ).expanduser().absolute()
 
     config_errors: list[str] = []
-    config_warnings: list[str] = []
+    config_warnings = list(config_warnings)
     openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
     openai_base_url = os.getenv("OPENAI_BASE_URL", "").strip()
     if not nvidia_api_key:
@@ -203,6 +241,7 @@ def load_config() -> AppConfig:
         pubmed_cache_ttl_seconds=max(60, pubmed_cache_ttl_seconds),
         pubmed_negative_cache_ttl_seconds=max(60, pubmed_negative_cache_ttl_seconds),
         max_abstracts=max(1, min(20, max_abstracts)),
+        max_context_abstracts=max(1, min(20, max_context_abstracts)),
         max_context_tokens=max(256, min(20000, max_context_tokens)),
         context_trim_strategy=context_trim_strategy,
         hybrid_retrieval=hybrid_retrieval,
@@ -211,6 +250,9 @@ def load_config() -> AppConfig:
         alignment_mode=alignment_mode,
         show_rewritten_query=show_rewritten_query,
         auto_scroll=auto_scroll,
+        answer_cache_ttl_seconds=max(60, answer_cache_ttl_seconds),
+        answer_cache_min_similarity=max(0.0, min(1.0, answer_cache_min_similarity)),
+        answer_cache_strict_fingerprint=answer_cache_strict_fingerprint,
         metrics_mode=metrics_mode,
         metrics_store_path=metrics_store_path,
         config_errors=tuple(config_errors),

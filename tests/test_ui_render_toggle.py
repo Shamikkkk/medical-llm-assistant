@@ -57,18 +57,74 @@ class UiToggleTests(TestCase):
             patch("src.ui.render.st.caption"),
             patch("src.ui.render.st.slider", return_value=5),
             patch("src.ui.render.st.toggle", side_effect=_toggle),
+            patch("src.ui.render.st.selectbox", side_effect=["Auto", "Conversation branch [main]"]),
+            patch("src.ui.render.st.download_button"),
+            patch("src.ui.render.st.metric"),
             patch("src.ui.render.st.button", return_value=False),
         ):
             render_sidebar(
                 chats=[],
                 active_chat_id="chat-1",
+                branches=[{"branch_id": "main", "title": "Conversation branch"}],
+                active_branch_id="main",
                 top_n=5,
                 follow_up_mode=True,
                 show_papers=False,
                 show_rewritten_query=False,
                 auto_scroll_enabled=True,
+                compute_device_preference="auto",
+                effective_compute_device="cpu",
             )
 
         self.assertIn("Show papers", toggle_labels)
         self.assertIn("Show rewritten query", toggle_labels)
         self.assertIn("Auto-scroll", toggle_labels)
+
+    def test_sidebar_renders_latency_metrics_when_available(self) -> None:
+        from src.ui.render import render_sidebar
+
+        with (
+            patch("src.ui.render.st.sidebar", new=nullcontext()),
+            patch("src.ui.render.st.markdown"),
+            patch("src.ui.render.st.caption"),
+            patch("src.ui.render.st.slider", return_value=5),
+            patch("src.ui.render.st.toggle", return_value=False),
+            patch("src.ui.render.st.selectbox", side_effect=["Auto", "Conversation branch [main]"]),
+            patch("src.ui.render.st.download_button"),
+            patch("src.ui.render.st.metric") as mock_metric,
+            patch("src.ui.render.st.button", return_value=False),
+        ):
+            render_sidebar(
+                chats=[],
+                active_chat_id="chat-1",
+                branches=[{"branch_id": "main", "title": "Conversation branch"}],
+                active_branch_id="main",
+                top_n=5,
+                follow_up_mode=True,
+                show_papers=False,
+                show_rewritten_query=False,
+                auto_scroll_enabled=True,
+                compute_device_preference="auto",
+                effective_compute_device="cpu",
+                last_response_metrics={"retrieval_ms": 12.3, "total_ms": 30.1},
+            )
+
+        self.assertGreaterEqual(mock_metric.call_count, 2)
+
+    def test_source_item_opens_inspector_when_context_present(self) -> None:
+        from src.ui.render import render_source_item
+
+        with (
+            patch("src.ui.render.st.markdown"),
+            patch("src.ui.render.st.expander", return_value=nullcontext()) as mock_expander,
+        ):
+            render_source_item(
+                {
+                    "rank": 1,
+                    "pmid": "12345",
+                    "title": "Trial evidence",
+                    "context": "Abstract context used for the answer.",
+                }
+            )
+
+        mock_expander.assert_called_once_with("Source inspector", expanded=False)

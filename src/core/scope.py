@@ -6,6 +6,7 @@ import json
 import re
 
 from src.history import get_session_history
+from src.intent import is_forced_medical_query, normalize_user_query
 
 REFUSAL_MESSAGE = (
     "I focus on biomedical and health literature questions. "
@@ -36,6 +37,9 @@ BIOMEDICAL_PHRASES: tuple[str, ...] = (
     "inflammatory bowel disease",
     "low fodmap",
     "glioblastoma",
+    "smoking cessation",
+    "quit smoking",
+    "stop smoking",
 )
 
 BIOMEDICAL_WORDS: tuple[str, ...] = (
@@ -108,6 +112,15 @@ BIOMEDICAL_WORDS: tuple[str, ...] = (
     "cholesterol",
     "lipid",
     "blood pressure",
+    "smoking",
+    "smoke",
+    "smoker",
+    "tobacco",
+    "nicotine",
+    "vaping",
+    "vape",
+    "cigarette",
+    "cigarettes",
 )
 
 NON_BIOMEDICAL_WORDS: tuple[str, ...] = (
@@ -238,13 +251,21 @@ class ScopeResult:
 
 
 def classify_scope(query: str, session_id: str, llm: Any | None = None) -> ScopeResult:
-    normalized = _normalize(query)
+    normalized = normalize_user_query(query)
     if not normalized:
         return ScopeResult(
             label="OUT_OF_SCOPE",
             allow=False,
             user_message=REFUSAL_MESSAGE,
             reason="empty_query",
+        )
+
+    if is_forced_medical_query(query):
+        return ScopeResult(
+            label="BIOMEDICAL",
+            allow=True,
+            user_message="ok",
+            reason="medical_override_smoking",
         )
 
     if _matches_biomedical(normalized):

@@ -40,6 +40,7 @@ class PipelineGoldenTests(TestCase):
             log_pipeline=False,
             use_reranker=False,
             max_abstracts=8,
+            max_context_abstracts=4,
             max_context_tokens=2500,
             context_trim_strategy="truncate",
             hybrid_retrieval=False,
@@ -85,6 +86,7 @@ class PipelineGoldenTests(TestCase):
             ],
             "cache_hit": False,
             "cache_status": "miss",
+            "context_top_k": 4,
             "retrieval_ms": 12.5,
         }
 

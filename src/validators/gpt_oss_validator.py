@@ -27,6 +27,7 @@ def validate_answer(
     top_n_chunks: int = 4,
     top_k_sentences: int = 2,
     retrieved_docs: list[Any] | None = None,
+    device: str | None = None,
 ) -> dict[str, Any]:
     del user_query  # reserved for future policy rules
     normalized_context = str(context or "").strip()
@@ -68,7 +69,7 @@ def validate_answer(
         claims = [normalized_answer]
 
     missing_pmids = sorted(_extract_pmids(normalized_answer) - {str(p).strip() for p in source_pmids if str(p).strip()})
-    validator = get_nli_components(model_name)
+    validator = get_nli_components(model_name, device=device)
     if validator is None:
         LOGGER.warning("Validator fallback: disabled because model failed to load.")
         return {

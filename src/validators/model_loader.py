@@ -4,6 +4,8 @@ import logging
 import time
 from typing import Any
 
+from src.integrations.storage import resolve_compute_device
+
 LOGGER = logging.getLogger("validator.loader")
 
 DEFAULT_BASE_MODEL = "microsoft/deberta-v3-base"
@@ -18,22 +20,32 @@ _MODEL_ERRORS: dict[str, Exception] = {}
 _BASE_WARNING_EMITTED = False
 
 
-def get_nli_components(model_name: str | None = None) -> dict[str, Any] | None:
+def get_nli_components(
+    model_name: str | None = None,
+    *,
+    device: str | None = None,
+) -> dict[str, Any] | None:
     requested_model = (model_name or DEFAULT_NLI_MODEL).strip() or DEFAULT_NLI_MODEL
     resolved_model = _resolve_model_name(requested_model)
+    resolved_device, device_warning = resolve_compute_device(device)
+    cache_key = f"{resolved_model}::{resolved_device}"
 
-    if resolved_model in _MODEL_CACHE:
-        LOGGER.info("Validator model reused from cache. model=%s", resolved_model)
-        payload = dict(_MODEL_CACHE[resolved_model])
+    if cache_key in _MODEL_CACHE:
+        LOGGER.info(
+            "Validator model reused from cache. model=%s device=%s",
+            resolved_model,
+            resolved_device,
+        )
+        payload = dict(_MODEL_CACHE[cache_key])
         payload["from_cache"] = True
         return payload
-    if resolved_model in _MODEL_ERRORS:
+    if cache_key in _MODEL_ERRORS:
         return None
 
     try:
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
     except Exception as exc:  # pragma: no cover - optional dependency path
-        _MODEL_ERRORS[resolved_model] = exc
+        _MODEL_ERRORS[cache_key] = exc
         LOGGER.warning("Validator unavailable: import failed (%s)", exc)
         return None
 
@@ -42,12 +54,13 @@ def get_nli_components(model_name: str | None = None) -> dict[str, Any] | None:
         tokenizer = AutoTokenizer.from_pretrained(resolved_model, use_fast=True)
         model = AutoModelForSequenceClassification.from_pretrained(resolved_model)
         model.eval()
-        model.to("cpu")
+        model.to(resolved_device)
     except Exception as exc:  # pragma: no cover - runtime dependency path
-        _MODEL_ERRORS[resolved_model] = exc
+        _MODEL_ERRORS[cache_key] = exc
         LOGGER.warning(
-            "Validator unavailable: failed to load model=%s error=%s",
+            "Validator unavailable: failed to load model=%s device=%s error=%s",
             resolved_model,
+            resolved_device,
             exc,
         )
         return None
@@ -61,17 +74,21 @@ def get_nli_components(model_name: str | None = None) -> dict[str, Any] | None:
         "model": model,
         "model_name": resolved_model,
         "requested_model_name": requested_model,
+        "device": resolved_device,
         "label_map": label_map,
         "entailment_ready": entailment_ready,
     }
-    _MODEL_CACHE[resolved_model] = payload
+    _MODEL_CACHE[cache_key] = payload
     elapsed = time.perf_counter() - start
     LOGGER.info(
-        "Validator model loaded (cached). requested_model=%s effective_model=%s load_seconds=%.2f",
+        "Validator model loaded (cached). requested_model=%s effective_model=%s device=%s load_seconds=%.2f",
         requested_model,
         resolved_model,
+        resolved_device,
         elapsed,
     )
+    if device_warning:
+        LOGGER.warning(device_warning)
     return dict(payload)
 
 

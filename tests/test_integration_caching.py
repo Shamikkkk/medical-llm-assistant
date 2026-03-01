@@ -28,7 +28,10 @@ class StorageSingletonTests(TestCase):
         second = get_embeddings("model-a")
 
         self.assertIs(first, second)
-        mock_embeddings.assert_called_once_with(model_name="model-a")
+        mock_embeddings.assert_called_once_with(
+            model_name="model-a",
+            model_kwargs={"device": "cpu"},
+        )
 
     @patch("src.integrations.storage.SentenceTransformerEmbeddings")
     def test_embeddings_vary_by_model(self, mock_embeddings) -> None:
@@ -40,6 +43,20 @@ class StorageSingletonTests(TestCase):
         second = get_embeddings("model-b")
 
         self.assertIsNot(first, second)
+        self.assertEqual(mock_embeddings.call_count, 2)
+
+    @patch("src.integrations.storage.resolve_compute_device")
+    @patch("src.integrations.storage.SentenceTransformerEmbeddings")
+    def test_embeddings_vary_by_device(self, mock_embeddings, mock_resolve_device) -> None:
+        from src.integrations.storage import get_embeddings
+
+        mock_resolve_device.side_effect = [("cpu", None), ("cuda", None)]
+        mock_embeddings.side_effect = lambda **_: object()
+
+        cpu_embeddings = get_embeddings("model-a", device="cpu")
+        gpu_embeddings = get_embeddings("model-a", device="gpu")
+
+        self.assertIsNot(cpu_embeddings, gpu_embeddings)
         self.assertEqual(mock_embeddings.call_count, 2)
 
     @patch("src.integrations.storage.Path.mkdir")

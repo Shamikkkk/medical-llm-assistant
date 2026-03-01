@@ -72,3 +72,27 @@ class ChatRouterTests(TestCase):
         called_query = mock_invoke_chat_with_mode.call_args.args[0]
         self.assertIn("HFpEF", called_query)
         self.assertTrue(mock_invoke_chat_with_mode.call_args.kwargs["include_paper_links"])
+
+    @patch("src.chat.router.invoke_chat_with_mode")
+    @patch("src.chat.router._get_llm_safe")
+    def test_router_passes_branch_id_to_runtime(
+        self,
+        mock_llm_safe,
+        mock_invoke_chat_with_mode,
+    ) -> None:
+        from src.chat.router import invoke_chat_request
+
+        mock_llm_safe.return_value = None
+        mock_invoke_chat_with_mode.return_value = {"status": "answered", "answer": "ok"}
+
+        invoke_chat_request(
+            query="What about safety outcomes?",
+            session_id="chat-1",
+            branch_id="branch-a",
+            top_n=5,
+            agent_mode=False,
+            follow_up_mode=False,
+            chat_messages=[],
+        )
+
+        self.assertEqual(mock_invoke_chat_with_mode.call_args.kwargs["branch_id"], "branch-a")

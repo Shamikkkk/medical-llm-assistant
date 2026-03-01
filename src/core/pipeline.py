@@ -17,7 +17,12 @@ from src.core.retrieval import (
 )
 from src.core.scope import ScopeResult, classify_scope
 from src.history import get_session_history
-from src.intent import classify_intent_details, smalltalk_reply
+from src.intent import (
+    classify_intent_details,
+    normalize_user_query,
+    should_short_circuit_smalltalk,
+    smalltalk_reply,
+)
 from src.integrations.nvidia import get_nvidia_llm
 from src.integrations.pubmed import (
     pubmed_efetch,
@@ -26,10 +31,14 @@ from src.integrations.pubmed import (
     to_documents,
 )
 from src.integrations.storage import (
+    build_answer_cache_fingerprint,
     get_abstract_store,
+    get_answer_cache_store,
     get_query_cache_store,
+    lookup_answer_cache,
     lookup_query_result_cache,
     remember_query_result,
+    store_answer_cache,
     upsert_abstracts,
 )
 from src.logging_utils import hash_query_text, log_event, log_llm_usage
@@ -61,6 +70,7 @@ PRONOUN_PATTERN = re.compile(
     r"\b(it|they|this|that|those|these|them|its|their|here|there)\b",
     flags=re.IGNORECASE,
 )
+QUERY_CACHE_PMID_STORE_LIMIT = 50
 
 
 class _PipelineRetriever:
@@ -108,15 +118,15 @@ class _PipelineRetriever:
                     retrieval_query,
                     docs_list,
                     alpha=self._hybrid_alpha,
-                    limit=self._final_k,
+                    limit=len(docs_list),
                 )
-        else:
-            docs_list = docs_list[: self._final_k]
+        docs_list = select_context_documents(docs_list, max_abstracts=self._final_k)
 
         _pipeline_log(
             self._log_pipeline,
-            "[PIPELINE] Retriever invoke complete | docs=%s hybrid=%s",
+            "[PIPELINE] Retriever invoke complete | returned_docs_len=%s unique_pmids=%s hybrid=%s",
             len(docs_list),
+            _count_unique_pmids_from_docs(docs_list),
             self._hybrid_retrieval,
         )
         return docs_list
@@ -133,10 +143,12 @@ def run_pipeline(query: str) -> PipelineResponse:
 def invoke_chat(
     query: str,
     session_id: str,
+    branch_id: str = "main",
     top_n: int = 10,
     *,
     request_id: str | None = None,
     include_paper_links: bool = True,
+    compute_device: str | None = None,
 ) -> PipelineResponse:
     config = load_config()
     current_request_id = request_id or uuid4().hex
@@ -145,17 +157,20 @@ def invoke_chat(
         return _invoke_chat_impl(
             query=query,
             session_id=session_id,
+            branch_id=branch_id,
             top_n=top_n,
             config=config,
             request_id=current_request_id,
             include_paper_links=include_paper_links,
             start_time=start_time,
+            compute_device=compute_device,
         )
     except Exception as exc:
         _log_request_error(
             config=config,
             request_id=current_request_id,
             session_id=session_id,
+            branch_id=branch_id,
             query=query,
             started_at=start_time,
             error=exc,
@@ -166,10 +181,12 @@ def invoke_chat(
 def stream_chat(
     query: str,
     session_id: str,
+    branch_id: str = "main",
     top_n: int = 10,
     *,
     request_id: str | None = None,
     include_paper_links: bool = True,
+    compute_device: str | None = None,
 ):
     config = load_config()
     current_request_id = request_id or uuid4().hex
@@ -178,17 +195,20 @@ def stream_chat(
         return (yield from _stream_chat_impl(
             query=query,
             session_id=session_id,
+            branch_id=branch_id,
             top_n=top_n,
             config=config,
             request_id=current_request_id,
             include_paper_links=include_paper_links,
             start_time=start_time,
+            compute_device=compute_device,
         ))
     except Exception as exc:
         _log_request_error(
             config=config,
             request_id=current_request_id,
             session_id=session_id,
+            branch_id=branch_id,
             query=query,
             started_at=start_time,
             error=exc,
@@ -199,6 +219,7 @@ def stream_chat(
 def build_contextual_retrieval_query(
     user_query: str,
     session_id: str,
+    branch_id: str = "main",
     llm: Any | None = None,
     base_query: str | None = None,
 ) -> str:
@@ -210,7 +231,7 @@ def build_contextual_retrieval_query(
     if not _is_followup_query(normalized):
         return base_query
 
-    history_excerpt = _get_history_excerpt(session_id)
+    history_excerpt = _get_history_excerpt(session_id, branch_id=branch_id)
     if not history_excerpt:
         return base_query
 
@@ -226,7 +247,7 @@ def build_contextual_retrieval_query(
         if rewritten:
             return _sanitize_query(rewritten, fallback=base_query)
 
-    snippet = _get_last_assistant_excerpt(session_id)
+    snippet = _get_last_assistant_excerpt(session_id, branch_id=branch_id)
     if snippet:
         expanded = f"{base_query} {snippet}"
         return expanded[:300].strip()
@@ -237,18 +258,21 @@ def _invoke_chat_impl(
     *,
     query: str,
     session_id: str,
+    branch_id: str = "main",
     top_n: int,
     config: AppConfig,
     request_id: str,
     include_paper_links: bool,
     start_time: float,
+    compute_device: str | None = None,
 ) -> PipelineResponse:
-    safe_top_n = min(_sanitize_top_n(top_n), int(config.max_abstracts))
+    requested_top_n = _sanitize_top_n(top_n)
+    normalized_query = normalize_user_query(query)
     llm = _get_llm_safe(config)
-    intent = classify_intent_details(query, llm, log_enabled=config.log_pipeline)
+    intent = classify_intent_details(normalized_query, llm, log_enabled=config.log_pipeline)
     intent_label = str(intent.get("label", "")).lower()
     intent_confidence = float(intent.get("confidence", 0.0) or 0.0)
-    if intent_label == "smalltalk":
+    if should_short_circuit_smalltalk(intent, normalized_query):
         reply = smalltalk_reply(query, llm=llm)
         payload: PipelineResponse = {
             "status": "smalltalk",
@@ -258,12 +282,15 @@ def _invoke_chat_impl(
             "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
+            "branch_id": branch_id,
             "request_id": request_id,
+            "timings": {"total_ms": _elapsed_ms(start_time)},
         }
         _log_request_success(
             config=config,
             request_id=request_id,
             session_id=session_id,
+            branch_id=branch_id,
             query=query,
             payload=payload,
             cache_hit=False,
@@ -274,7 +301,7 @@ def _invoke_chat_impl(
         )
         return payload
 
-    scope = classify_scope(query, session_id=session_id, llm=llm)
+    scope = classify_scope(normalized_query, session_id=session_id, llm=llm)
     if not scope.allow:
         payload = {
             "status": "out_of_scope",
@@ -284,12 +311,15 @@ def _invoke_chat_impl(
             "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
+            "branch_id": branch_id,
             "request_id": request_id,
+            "timings": {"total_ms": _elapsed_ms(start_time)},
         }
         _log_request_success(
             config=config,
             request_id=request_id,
             session_id=session_id,
+            branch_id=branch_id,
             query=query,
             payload=payload,
             cache_hit=False,
@@ -300,16 +330,73 @@ def _invoke_chat_impl(
         )
         return payload
 
+    answer_cache_store = None
+    answer_cache_fingerprint = ""
+    answer_cache_lookup_ms = 0.0
+    if _answer_cache_enabled(config):
+        answer_cache_store = get_answer_cache_store(
+            str(config.data_dir / "chroma"),
+            embeddings_device=compute_device,
+        )
+        answer_cache_fingerprint = build_answer_cache_fingerprint(
+            config=config,
+            top_n=requested_top_n,
+            include_paper_links=include_paper_links,
+            backend="baseline",
+        )
+        answer_cache_lookup_start = perf_counter()
+        cached_answer = lookup_answer_cache(
+            normalized_query,
+            store=answer_cache_store,
+            config_fingerprint=answer_cache_fingerprint,
+            ttl_seconds=int(getattr(config, "answer_cache_ttl_seconds", 604800)),
+            min_similarity=float(getattr(config, "answer_cache_min_similarity", 0.9)),
+            strict_fingerprint=bool(getattr(config, "answer_cache_strict_fingerprint", True)),
+        )
+        answer_cache_lookup_ms = (perf_counter() - answer_cache_lookup_start) * 1000.0
+        if cached_answer is not None:
+            payload = _build_answer_cache_hit_payload(
+                cached_answer,
+                request_id=request_id,
+                query=query,
+                branch_id=branch_id,
+                lookup_ms=answer_cache_lookup_ms,
+            )
+            _pipeline_log(
+                config.log_pipeline,
+                "[PIPELINE] Answer cache hit | query_hash=%s similarity=%.3f match_type=%s",
+                hash_query_text(query)[:12],
+                float(payload.get("answer_cache_similarity", 0.0) or 0.0),
+                str(payload.get("answer_cache_match_type", "") or "similar"),
+            )
+            _log_request_success(
+                config=config,
+                request_id=request_id,
+                session_id=session_id,
+                branch_id=branch_id,
+                query=query,
+                payload=payload,
+                cache_hit=True,
+                retrieval_ms=0.0,
+                llm_ms=0.0,
+                total_ms=(perf_counter() - start_time) * 1000.0,
+                usage_stats={},
+            )
+            return payload
+
     context = _prepare_chat_context(
-        query=query,
+        query=normalized_query,
         session_id=session_id,
-        top_n=safe_top_n,
+        branch_id=branch_id,
+        top_n=requested_top_n,
         llm=llm,
         scope=scope,
         config=config,
         request_id=request_id,
+        compute_device=compute_device,
     )
     llm = context["llm"]
+    context_top_k = int(context["context_top_k"])
 
     if llm is None:
         payload = {
@@ -326,12 +413,20 @@ def _invoke_chat_impl(
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
             "cache_hit": context["cache_hit"],
+            "branch_id": branch_id,
             "request_id": request_id,
+            "timings": {
+                "answer_cache_lookup_ms": round(answer_cache_lookup_ms, 3),
+                "retrieval_ms": round(float(context["retrieval_ms"]), 3),
+                "llm_ms": 0.0,
+                "total_ms": _elapsed_ms(start_time),
+            },
         }
         _log_request_success(
             config=config,
             request_id=request_id,
             session_id=session_id,
+            branch_id=branch_id,
             query=query,
             payload=payload,
             cache_hit=context["cache_hit"],
@@ -345,7 +440,7 @@ def _invoke_chat_impl(
     base_chain = build_rag_chain(
         llm,
         context["retriever"],
-        max_abstracts=config.max_abstracts,
+        max_abstracts=context_top_k,
         max_context_tokens=config.max_context_tokens,
         trim_strategy=config.context_trim_strategy,
     )
@@ -358,10 +453,10 @@ def _invoke_chat_impl(
                 "input": query,
                 "retrieval_query": context["retrieval_query"],
             },
-            config={"configurable": {"session_id": session_id}},
+            config={"configurable": {"session_id": session_id, "branch_id": branch_id}},
         )
     usage_stats = log_llm_usage("answer.invoke", raw_answer)
-    llm_ms = (perf_counter() - llm_start) * 1000.0
+    llm_ms = _phase_elapsed_ms(llm_start, start_time)
     answer = _extract_message_text(raw_answer)
 
     retrieved_docs = _retrieve_docs_for_sources(
@@ -371,7 +466,7 @@ def _invoke_chat_impl(
     retrieved_contexts = _docs_to_eval_contexts(
         retrieved_docs,
         config=config,
-        top_n=safe_top_n,
+        top_n=requested_top_n,
     )
     if config.citation_alignment:
         answer, alignment_issues = align_answer_citations(
@@ -381,17 +476,34 @@ def _invoke_chat_impl(
         )
     else:
         alignment_issues = []
-    sources = _collect_sources_from_docs(
-        retrieved_docs,
-        top_n=safe_top_n,
+    sources = _expand_display_sources(
+        _collect_sources_from_docs(
+            retrieved_docs,
+            top_n=requested_top_n,
+            include_paper_links=include_paper_links,
+        ),
+        docs_preview=context["docs_preview"],
+        top_n=requested_top_n,
         include_paper_links=include_paper_links,
     )
     validation_payload = _run_optional_validation(
         config=config,
-        user_query=query,
+        user_query=normalized_query,
         answer=answer,
         retrieved_docs=retrieved_docs,
         sources=sources,
+        context_top_k=context_top_k,
+        compute_device=compute_device,
+    )
+    _pipeline_log(
+        config.log_pipeline,
+        "[PIPELINE] Final source selection | requested_top_n=%s context_top_k=%s docs_preview=%s retrieved_docs=%s unique_retrieved_pmids=%s final_sources=%s",
+        requested_top_n,
+        context_top_k,
+        len(context["docs_preview"]),
+        len(retrieved_docs),
+        _count_unique_pmids_from_docs(retrieved_docs),
+        len(sources),
     )
 
     payload: PipelineResponse = {
@@ -411,15 +523,38 @@ def _invoke_chat_impl(
         "retrieved_contexts": retrieved_contexts,
         "cache_hit": context["cache_hit"],
         "cache_status": context["cache_status"],
+        "branch_id": branch_id,
         "request_id": request_id,
+        "timings": {
+            "answer_cache_lookup_ms": round(answer_cache_lookup_ms, 3),
+            "retrieval_ms": round(float(context["retrieval_ms"]), 3),
+            "llm_ms": round(llm_ms, 3),
+            "total_ms": _elapsed_ms(start_time),
+        },
     }
     if alignment_issues:
         payload["alignment_issues"] = alignment_issues
+    _add_source_count_note(
+        payload,
+        requested_top_n=requested_top_n,
+        diagnostics=context.get("source_diagnostics"),
+        log_pipeline=config.log_pipeline,
+    )
     payload.update(validation_payload)
+    if answer_cache_store is not None and answer_cache_fingerprint:
+        store_answer_cache(
+            normalized_query,
+            response_payload=payload,
+            config_fingerprint=answer_cache_fingerprint,
+            store=answer_cache_store,
+            model_id=str(getattr(config, "nvidia_model", "") or ""),
+            backend="baseline",
+        )
     _log_request_success(
         config=config,
         request_id=request_id,
         session_id=session_id,
+        branch_id=branch_id,
         query=query,
         payload=payload,
         cache_hit=context["cache_hit"],
@@ -435,18 +570,21 @@ def _stream_chat_impl(
     *,
     query: str,
     session_id: str,
+    branch_id: str = "main",
     top_n: int,
     config: AppConfig,
     request_id: str,
     include_paper_links: bool,
     start_time: float,
+    compute_device: str | None = None,
 ):
-    safe_top_n = min(_sanitize_top_n(top_n), int(config.max_abstracts))
+    requested_top_n = _sanitize_top_n(top_n)
+    normalized_query = normalize_user_query(query)
     llm = _get_llm_safe(config)
-    intent = classify_intent_details(query, llm, log_enabled=config.log_pipeline)
+    intent = classify_intent_details(normalized_query, llm, log_enabled=config.log_pipeline)
     intent_label = str(intent.get("label", "")).lower()
     intent_confidence = float(intent.get("confidence", 0.0) or 0.0)
-    if intent_label == "smalltalk":
+    if should_short_circuit_smalltalk(intent, normalized_query):
         reply = smalltalk_reply(query, llm=llm)
         yield reply
         payload: PipelineResponse = {
@@ -457,12 +595,15 @@ def _stream_chat_impl(
             "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
+            "branch_id": branch_id,
             "request_id": request_id,
+            "timings": {"total_ms": _elapsed_ms(start_time)},
         }
         _log_request_success(
             config=config,
             request_id=request_id,
             session_id=session_id,
+            branch_id=branch_id,
             query=query,
             payload=payload,
             cache_hit=False,
@@ -473,7 +614,7 @@ def _stream_chat_impl(
         )
         return payload
 
-    scope = classify_scope(query, session_id=session_id, llm=llm)
+    scope = classify_scope(normalized_query, session_id=session_id, llm=llm)
     if not scope.allow:
         yield scope.user_message
         payload = {
@@ -487,12 +628,15 @@ def _stream_chat_impl(
             "retrieved_contexts": [],
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
+            "branch_id": branch_id,
             "request_id": request_id,
+            "timings": {"total_ms": _elapsed_ms(start_time)},
         }
         _log_request_success(
             config=config,
             request_id=request_id,
             session_id=session_id,
+            branch_id=branch_id,
             query=query,
             payload=payload,
             cache_hit=False,
@@ -503,16 +647,76 @@ def _stream_chat_impl(
         )
         return payload
 
+    answer_cache_store = None
+    answer_cache_fingerprint = ""
+    answer_cache_lookup_ms = 0.0
+    if _answer_cache_enabled(config):
+        answer_cache_store = get_answer_cache_store(
+            str(config.data_dir / "chroma"),
+            embeddings_device=compute_device,
+        )
+        answer_cache_fingerprint = build_answer_cache_fingerprint(
+            config=config,
+            top_n=requested_top_n,
+            include_paper_links=include_paper_links,
+            backend="baseline",
+        )
+        answer_cache_lookup_start = perf_counter()
+        cached_answer = lookup_answer_cache(
+            normalized_query,
+            store=answer_cache_store,
+            config_fingerprint=answer_cache_fingerprint,
+            ttl_seconds=int(getattr(config, "answer_cache_ttl_seconds", 604800)),
+            min_similarity=float(getattr(config, "answer_cache_min_similarity", 0.9)),
+            strict_fingerprint=bool(getattr(config, "answer_cache_strict_fingerprint", True)),
+        )
+        answer_cache_lookup_ms = (perf_counter() - answer_cache_lookup_start) * 1000.0
+        if cached_answer is not None:
+            payload = _build_answer_cache_hit_payload(
+                cached_answer,
+                request_id=request_id,
+                query=query,
+                branch_id=branch_id,
+                lookup_ms=answer_cache_lookup_ms,
+            )
+            cached_answer_text = str(payload.get("answer") or payload.get("message") or "")
+            if cached_answer_text:
+                yield cached_answer_text
+            _pipeline_log(
+                config.log_pipeline,
+                "[PIPELINE] Answer cache hit | query_hash=%s similarity=%.3f match_type=%s",
+                hash_query_text(query)[:12],
+                float(payload.get("answer_cache_similarity", 0.0) or 0.0),
+                str(payload.get("answer_cache_match_type", "") or "similar"),
+            )
+            _log_request_success(
+                config=config,
+                request_id=request_id,
+                session_id=session_id,
+                branch_id=branch_id,
+                query=query,
+                payload=payload,
+                cache_hit=True,
+                retrieval_ms=0.0,
+                llm_ms=0.0,
+                total_ms=(perf_counter() - start_time) * 1000.0,
+                usage_stats={},
+            )
+            return payload
+
     context = _prepare_chat_context(
-        query=query,
+        query=normalized_query,
         session_id=session_id,
-        top_n=safe_top_n,
+        branch_id=branch_id,
+        top_n=requested_top_n,
         llm=llm,
         scope=scope,
         config=config,
         request_id=request_id,
+        compute_device=compute_device,
     )
     llm = context["llm"]
+    context_top_k = int(context["context_top_k"])
 
     if llm is None:
         fallback = "LLM not configured. Set NVIDIA_API_KEY to enable contextual answers."
@@ -531,12 +735,20 @@ def _stream_chat_impl(
             "intent_label": intent_label,
             "intent_confidence": intent_confidence,
             "cache_hit": context["cache_hit"],
+            "branch_id": branch_id,
             "request_id": request_id,
+            "timings": {
+                "answer_cache_lookup_ms": round(answer_cache_lookup_ms, 3),
+                "retrieval_ms": round(float(context["retrieval_ms"]), 3),
+                "llm_ms": 0.0,
+                "total_ms": _elapsed_ms(start_time),
+            },
         }
         _log_request_success(
             config=config,
             request_id=request_id,
             session_id=session_id,
+            branch_id=branch_id,
             query=query,
             payload=payload,
             cache_hit=context["cache_hit"],
@@ -550,7 +762,7 @@ def _stream_chat_impl(
     base_chain = build_rag_chain(
         llm,
         context["retriever"],
-        max_abstracts=config.max_abstracts,
+        max_abstracts=context_top_k,
         max_context_tokens=config.max_context_tokens,
         trim_strategy=config.context_trim_strategy,
     )
@@ -565,7 +777,7 @@ def _stream_chat_impl(
                 "input": query,
                 "retrieval_query": context["retrieval_query"],
             },
-            config={"configurable": {"session_id": session_id}},
+            config={"configurable": {"session_id": session_id, "branch_id": branch_id}},
         ):
             if _has_usage_metadata(chunk):
                 usage_candidate = chunk
@@ -575,7 +787,7 @@ def _stream_chat_impl(
             answer_text += text
             yield text
     usage_stats = log_llm_usage("answer.stream", usage_candidate)
-    llm_ms = (perf_counter() - llm_start) * 1000.0
+    llm_ms = _phase_elapsed_ms(llm_start, start_time)
 
     retrieved_docs = _retrieve_docs_for_sources(
         retriever=context["retriever"],
@@ -584,7 +796,7 @@ def _stream_chat_impl(
     retrieved_contexts = _docs_to_eval_contexts(
         retrieved_docs,
         config=config,
-        top_n=safe_top_n,
+        top_n=requested_top_n,
     )
     if config.citation_alignment:
         answer_text, alignment_issues = align_answer_citations(
@@ -594,17 +806,34 @@ def _stream_chat_impl(
         )
     else:
         alignment_issues = []
-    sources = _collect_sources_from_docs(
-        retrieved_docs,
-        top_n=safe_top_n,
+    sources = _expand_display_sources(
+        _collect_sources_from_docs(
+            retrieved_docs,
+            top_n=requested_top_n,
+            include_paper_links=include_paper_links,
+        ),
+        docs_preview=context["docs_preview"],
+        top_n=requested_top_n,
         include_paper_links=include_paper_links,
     )
     validation_payload = _run_optional_validation(
         config=config,
-        user_query=query,
+        user_query=normalized_query,
         answer=answer_text,
         retrieved_docs=retrieved_docs,
         sources=sources,
+        context_top_k=context_top_k,
+        compute_device=compute_device,
+    )
+    _pipeline_log(
+        config.log_pipeline,
+        "[PIPELINE] Final source selection | requested_top_n=%s context_top_k=%s docs_preview=%s retrieved_docs=%s unique_retrieved_pmids=%s final_sources=%s",
+        requested_top_n,
+        context_top_k,
+        len(context["docs_preview"]),
+        len(retrieved_docs),
+        _count_unique_pmids_from_docs(retrieved_docs),
+        len(sources),
     )
     payload: PipelineResponse = {
         "status": "answered",
@@ -623,15 +852,38 @@ def _stream_chat_impl(
         "retrieved_contexts": retrieved_contexts,
         "cache_hit": context["cache_hit"],
         "cache_status": context["cache_status"],
+        "branch_id": branch_id,
         "request_id": request_id,
+        "timings": {
+            "answer_cache_lookup_ms": round(answer_cache_lookup_ms, 3),
+            "retrieval_ms": round(float(context["retrieval_ms"]), 3),
+            "llm_ms": round(llm_ms, 3),
+            "total_ms": _elapsed_ms(start_time),
+        },
     }
     if alignment_issues:
         payload["alignment_issues"] = alignment_issues
+    _add_source_count_note(
+        payload,
+        requested_top_n=requested_top_n,
+        diagnostics=context.get("source_diagnostics"),
+        log_pipeline=config.log_pipeline,
+    )
     payload.update(validation_payload)
+    if answer_cache_store is not None and answer_cache_fingerprint:
+        store_answer_cache(
+            normalized_query,
+            response_payload=payload,
+            config_fingerprint=answer_cache_fingerprint,
+            store=answer_cache_store,
+            model_id=str(getattr(config, "nvidia_model", "") or ""),
+            backend="baseline",
+        )
     _log_request_success(
         config=config,
         request_id=request_id,
         session_id=session_id,
+        branch_id=branch_id,
         query=query,
         payload=payload,
         cache_hit=context["cache_hit"],
@@ -647,17 +899,24 @@ def _prepare_chat_context(
     *,
     query: str,
     session_id: str,
+    branch_id: str = "main",
     top_n: int,
     llm: Any | None = None,
     scope: ScopeResult | None = None,
     config: AppConfig | None = None,
     request_id: str = "",
     executor_factory=ThreadPoolExecutor,
+    compute_device: str | None = None,
 ) -> Dict[str, Any]:
     config = config or load_config()
     persist_dir = str(config.data_dir / "chroma")
     log_pipeline = bool(getattr(config, "log_pipeline", False))
-    effective_top_n = min(int(top_n), int(config.max_abstracts))
+    requested_top_n = _sanitize_top_n(top_n)
+    context_top_k = _resolve_context_top_k(config, requested_top_n)
+    candidate_fetch_k = requested_top_n
+    if bool(getattr(config, "use_reranker", False)) or bool(getattr(config, "hybrid_retrieval", False)):
+        candidate_fetch_k = max(candidate_fetch_k, min(50, requested_top_n * 3))
+    cache_store_retmax = max(candidate_fetch_k, QUERY_CACHE_PMID_STORE_LIMIT)
     cache_ttl_seconds = int(getattr(config, "pubmed_cache_ttl_seconds", 604800))
     negative_cache_ttl_seconds = int(
         getattr(config, "pubmed_negative_cache_ttl_seconds", 3600)
@@ -674,16 +933,26 @@ def _prepare_chat_context(
     start = perf_counter()
     _pipeline_log(
         log_pipeline,
-        "[PIPELINE] Query start | query_hash=%s top_n=%s session_id=%s request_id=%s",
+        "[PIPELINE] Query start | query_hash=%s requested_top_n=%s context_top_k=%s candidate_fetch_k=%s session_id=%s request_id=%s",
         hash_query_text(query)[:12],
-        effective_top_n,
+        requested_top_n,
+        context_top_k,
+        candidate_fetch_k,
         session_id,
         request_id,
     )
 
     with executor_factory(max_workers=3) as executor:
-        cache_future = executor.submit(get_query_cache_store, persist_dir)
-        abstract_future = executor.submit(get_abstract_store, persist_dir)
+        cache_future = executor.submit(
+            get_query_cache_store,
+            persist_dir,
+            embeddings_device=compute_device,
+        )
+        abstract_future = executor.submit(
+            get_abstract_store,
+            persist_dir,
+            embeddings_device=compute_device,
+        )
 
         cache_store = cache_future.result()
         abstract_store = abstract_future.result()
@@ -704,37 +973,78 @@ def _prepare_chat_context(
             if cached_query and cached_query == scope.reframed_query:
                 use_cache = True
 
+        cached_pmids = _normalize_pmid_list((cache_payload or {}).get("pmids"))
+        if use_cache and len(cached_pmids) < requested_top_n:
+            use_cache = False
+            _pipeline_log(
+                log_pipeline,
+                "[PIPELINE] Cache payload insufficient for requested_top_n | cached_pmids_len=%s requested_top_n=%s candidate_fetch_k=%s query_hash=%s",
+                len(cached_pmids),
+                requested_top_n,
+                candidate_fetch_k,
+                hash_query_text(query)[:12],
+            )
+
         if use_cache:
             pubmed_query = str(cache_payload.get("pubmed_query") or pubmed_query)
-            pmids = [str(pmid) for pmid in (cache_payload.get("pmids") or [])][:effective_top_n]
             with start_span(
                 "pubmed.retrieve",
                 attributes={"request_id": request_id, "cache_hit": True},
             ):
-                records = pubmed_efetch(pmids) if pmids else []
-            documents = to_documents(records)
+                fetched_pmids, records, documents = _fetch_records_for_pmids(
+                    cached_pmids,
+                    target_count=candidate_fetch_k,
+                )
+            search_pmids = list(cached_pmids)
+            _pipeline_log(
+                log_pipeline,
+                "[PIPELINE] Cache hit fetch | cached_pmids_len=%s sliced_pmids_len=%s records_len=%s documents_len=%s",
+                len(cached_pmids),
+                len(fetched_pmids),
+                len(records),
+                len(documents),
+            )
             cache_status = "hit"
         else:
             if scope.reframed_query:
                 pubmed_query = scope.reframed_query
             else:
                 pubmed_query = rewrite_to_pubmed_query(query, llm)
-            fetch_future: Future[tuple[list[str], list[dict[str, Any]], list[Any]]] = executor.submit(
+            fetch_future: Future[tuple[list[str], list[str], list[dict[str, Any]], list[Any]]] = executor.submit(
                 _fetch_pubmed_records,
                 pubmed_query,
-                effective_top_n,
+                candidate_fetch_k,
+                cache_store_retmax,
                 request_id,
             )
-            pmids, records, documents = fetch_future.result()
+            search_pmids, fetched_pmids, records, documents = fetch_future.result()
             remember_query_result(
                 query,
                 pubmed_query=pubmed_query,
-                pmids=pmids,
+                pmids=search_pmids,
+                requested_retmax=cache_store_retmax,
                 store=cache_store,
+            )
+            _pipeline_log(
+                log_pipeline,
+                "[PIPELINE] PubMed fetch complete | esearch_pmids_len=%s sliced_pmids_len=%s records_len=%s documents_len=%s candidate_fetch_k=%s cache_store_retmax=%s",
+                len(search_pmids),
+                len(fetched_pmids),
+                len(records),
+                len(documents),
+                candidate_fetch_k,
+                cache_store_retmax,
             )
             cache_status = "miss"
 
         reranker_resources = reranker_future.result()
+
+    source_diagnostics = _build_source_diagnostics(
+        search_pmids=search_pmids,
+        fetched_pmids=fetched_pmids,
+        records=records,
+        documents=documents,
+    )
 
     if documents:
         embedded_count = upsert_abstracts(
@@ -751,6 +1061,12 @@ def _prepare_chat_context(
             "[PIPELINE] Embedding skipped | reason=no_documents query_hash=%s",
             hash_query_text(query)[:12],
         )
+    _pipeline_log(
+        log_pipeline,
+        "[PIPELINE] Abstract upsert status | embedded_count=%s documents_len=%s",
+        embedded_count,
+        len(documents),
+    )
 
     if scope.reframed_query:
         retrieval_query = scope.reframed_query
@@ -758,13 +1074,14 @@ def _prepare_chat_context(
         retrieval_query = build_contextual_retrieval_query(
             query,
             session_id,
+            branch_id=branch_id,
             llm=llm,
             base_query=pubmed_query,
         )
 
     retriever, reranker_active = _build_retriever(
         abstract_store=abstract_store,
-        top_n=effective_top_n,
+        top_n=requested_top_n,
         use_reranker=bool(config.use_reranker),
         hybrid_retrieval=bool(config.hybrid_retrieval),
         hybrid_alpha=float(config.hybrid_alpha),
@@ -779,8 +1096,13 @@ def _prepare_chat_context(
     retrieval_ms = (perf_counter() - start) * 1000.0
     _pipeline_log(
         log_pipeline,
-        "[PIPELINE] Retrieval config | retriever_k=%s reranker_active=%s cache=%s abstracts_fetched=%s abstracts_embedded=%s retrieval_ms=%.2f",
-        effective_top_n,
+        "[PIPELINE] Retrieval config | requested_top_n=%s context_top_k=%s candidate_fetch_k=%s esearch_pmids=%s unique_record_pmids=%s documents_len=%s reranker_active=%s cache=%s abstracts_fetched=%s abstracts_embedded=%s retrieval_ms=%.2f",
+        requested_top_n,
+        context_top_k,
+        candidate_fetch_k,
+        source_diagnostics["esearch_pmids_len"],
+        _count_unique_pmids_from_records(records),
+        len(documents),
         reranker_active,
         cache_status,
         len(records),
@@ -795,28 +1117,69 @@ def _prepare_chat_context(
         "pubmed_query": pubmed_query,
         "retrieval_query": retrieval_query,
         "reframe_note": reframe_note,
-        "docs_preview": _build_docs_preview(records, top_n=effective_top_n),
+        "docs_preview": _build_docs_preview(records, top_n=requested_top_n),
         "cache_status": cache_status,
-        "cache_hit": cache_status == "hit",
+        "cache_hit": cache_status in {"hit", "hit_refreshed"},
+        "context_top_k": context_top_k,
+        "candidate_fetch_k": candidate_fetch_k,
         "abstracts_fetched": len(records),
         "abstracts_embedded": embedded_count,
+        "source_diagnostics": source_diagnostics,
         "retrieval_ms": retrieval_ms,
     }
 
 
 def _fetch_pubmed_records(
     pubmed_query: str,
-    top_n: int,
+    candidate_fetch_k: int,
+    search_retmax: int,
     request_id: str,
-) -> tuple[list[str], list[dict[str, Any]], list[Any]]:
+) -> tuple[list[str], list[str], list[dict[str, Any]], list[Any]]:
     with start_span(
         "pubmed.retrieve",
         attributes={"request_id": request_id, "pubmed_query_hash": hash_query_text(pubmed_query)},
     ):
-        pmids = pubmed_esearch(pubmed_query, retmax=top_n)
-        records = pubmed_efetch(pmids)
-    documents = to_documents(records)
-    return pmids, records, documents
+        search_pmids = _normalize_pmid_list(pubmed_esearch(pubmed_query, retmax=search_retmax))
+        fetched_pmids, records, documents = _fetch_records_for_pmids(
+            search_pmids,
+            target_count=candidate_fetch_k,
+        )
+    return search_pmids, fetched_pmids, records, documents
+
+
+def _fetch_records_for_pmids(
+    pmids: list[str],
+    *,
+    target_count: int,
+) -> tuple[list[str], list[dict[str, Any]], list[Any]]:
+    normalized_pmids = _normalize_pmid_list(pmids)
+    if not normalized_pmids:
+        return [], [], []
+
+    target_unique_count = max(1, int(target_count))
+    records: list[dict[str, Any]] = []
+    fetched_pmids: list[str] = []
+    documents: list[Any] = []
+    batch_size = target_unique_count
+    offset = 0
+    while offset < len(normalized_pmids):
+        if (
+            _count_unique_pmids_from_records(records) >= target_unique_count
+            and _count_unique_pmids_from_docs(documents) >= target_unique_count
+        ):
+            break
+        batch_pmids = normalized_pmids[offset : offset + batch_size]
+        if not batch_pmids:
+            break
+        offset += len(batch_pmids)
+        fetched_pmids.extend(batch_pmids)
+        batch_records = pubmed_efetch(batch_pmids)
+        if batch_records:
+            records.extend(batch_records)
+            documents = to_documents(records)
+    if not documents:
+        documents = to_documents(records)
+    return fetched_pmids, records, documents
 
 
 def _prepare_reranker_resources(use_reranker: bool):
@@ -868,6 +1231,96 @@ def _retrieve_docs_for_sources(retriever, retrieval_query: str) -> list:
     return docs
 
 
+def _count_unique_pmids_from_records(records: List[Dict[str, Any]]) -> int:
+    seen: set[str] = set()
+    for record in records or []:
+        pmid = str((record or {}).get("pmid", "") or "").strip()
+        if pmid:
+            seen.add(pmid)
+    return len(seen)
+
+
+def _count_unique_pmids_from_docs(docs: list) -> int:
+    seen: set[str] = set()
+    for doc in docs or []:
+        metadata = getattr(doc, "metadata", {}) or {}
+        pmid = str(metadata.get("pmid", "") or "").strip()
+        if pmid:
+            seen.add(pmid)
+    return len(seen)
+
+
+def _normalize_pmid_list(pmids: Any) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_pmid in pmids or []:
+        pmid = str(raw_pmid or "").strip()
+        if not pmid or pmid in seen:
+            continue
+        seen.add(pmid)
+        normalized.append(pmid)
+    return normalized
+
+
+def _record_pmid_diagnostics(records: list[dict[str, Any]]) -> dict[str, int]:
+    seen: set[str] = set()
+    missing = 0
+    duplicates = 0
+    for record in records or []:
+        pmid = str((record or {}).get("pmid", "") or "").strip()
+        if not pmid:
+            missing += 1
+            continue
+        if pmid in seen:
+            duplicates += 1
+            continue
+        seen.add(pmid)
+    return {
+        "records_len": len(records or []),
+        "unique_record_pmids": len(seen),
+        "missing_record_pmids": missing,
+        "duplicate_record_pmids": duplicates,
+    }
+
+
+def _document_pmid_diagnostics(documents: list[Any]) -> dict[str, int]:
+    seen: set[str] = set()
+    missing = 0
+    duplicates = 0
+    for doc in documents or []:
+        metadata = getattr(doc, "metadata", {}) or {}
+        pmid = str(metadata.get("pmid", "") or "").strip()
+        if not pmid:
+            missing += 1
+            continue
+        if pmid in seen:
+            duplicates += 1
+            continue
+        seen.add(pmid)
+    return {
+        "documents_len": len(documents or []),
+        "unique_document_pmids": len(seen),
+        "missing_document_pmids": missing,
+        "duplicate_document_pmids": duplicates,
+    }
+
+
+def _build_source_diagnostics(
+    *,
+    search_pmids: list[str],
+    fetched_pmids: list[str],
+    records: list[dict[str, Any]],
+    documents: list[Any],
+) -> dict[str, int]:
+    diagnostics = {
+        "esearch_pmids_len": len(_normalize_pmid_list(search_pmids)),
+        "fetched_pmids_len": len(_normalize_pmid_list(fetched_pmids)),
+    }
+    diagnostics.update(_record_pmid_diagnostics(records))
+    diagnostics.update(_document_pmid_diagnostics(documents))
+    return diagnostics
+
+
 def _collect_sources_from_docs(
     docs: list,
     *,
@@ -894,11 +1347,157 @@ def _collect_sources_from_docs(
             pmcid = str(meta.get("pmcid", "") or "").strip()
             if pmcid:
                 item["pmcid"] = pmcid
+        context = _extract_doc_context(doc)
+        if context:
+            item["context"] = context
         sources.append(item)
         seen_pmids.add(pmid)
         if len(sources) >= top_n:
             break
     return sources
+
+
+def _expand_display_sources(
+    sources: list[SourceItem],
+    *,
+    docs_preview: list[SourceItem],
+    top_n: int,
+    include_paper_links: bool,
+) -> list[SourceItem]:
+    expanded = [dict(item) for item in (sources or []) if isinstance(item, Mapping)]
+    seen_pmids = {
+        str(item.get("pmid", "") or "").strip()
+        for item in expanded
+        if str(item.get("pmid", "") or "").strip()
+    }
+    preview_items = _filter_source_links(docs_preview or [], include_paper_links)
+    for preview_item in preview_items:
+        pmid = str(preview_item.get("pmid", "") or "").strip()
+        if not pmid or pmid in seen_pmids:
+            continue
+        item: SourceItem = {
+            "rank": len(expanded) + 1,
+            "pmid": pmid,
+            "title": str(preview_item.get("title", "") or ""),
+            "journal": str(preview_item.get("journal", "") or ""),
+            "year": str(preview_item.get("year", "") or ""),
+        }
+        if include_paper_links:
+            item["doi"] = str(preview_item.get("doi", "") or "")
+            item["fulltext_url"] = str(preview_item.get("fulltext_url", "") or "")
+            pmcid = str(preview_item.get("pmcid", "") or "").strip()
+            if pmcid:
+                item["pmcid"] = pmcid
+        expanded.append(item)
+        seen_pmids.add(pmid)
+        if len(expanded) >= max(1, int(top_n)):
+            break
+    for index, item in enumerate(expanded, start=1):
+        item["rank"] = index
+    return expanded[: max(1, int(top_n))]
+
+
+def _extract_doc_context(doc: Any, limit: int = 1800) -> str:
+    text = str(getattr(doc, "page_content", "") or "").strip()
+    if not text:
+        return ""
+    parts = [part.strip() for part in text.split("\n\n") if part.strip()]
+    if len(parts) >= 2:
+        text = "\n\n".join(parts[1:])
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _build_answer_cache_hit_payload(
+    cached_answer: Mapping[str, Any],
+    *,
+    request_id: str,
+    query: str,
+    branch_id: str,
+    lookup_ms: float,
+) -> PipelineResponse:
+    response_payload = dict(cached_answer.get("response_payload", {}) or {})
+    payload: PipelineResponse = dict(response_payload)
+    payload["query"] = query
+    payload["branch_id"] = branch_id
+    payload["request_id"] = request_id
+    payload["answer_cache_hit"] = True
+    payload["answer_cache_match_type"] = str(cached_answer.get("match_type", "similar") or "similar")
+    payload["answer_cache_created_at"] = str(cached_answer.get("created_at", "") or "")
+    payload["answer_cache_similarity"] = float(cached_answer.get("similarity", 0.0) or 0.0)
+    payload["answer_cache_query"] = str(cached_answer.get("matched_query", "") or "")
+    payload["answer_cache_config_match"] = bool(cached_answer.get("config_match", False))
+    payload["cache_hit"] = True
+    payload["cache_status"] = "answer_hit"
+    note = str(cached_answer.get("note", "") or "").strip()
+    if note:
+        payload["answer_cache_note"] = note
+    existing_timings = payload.get("timings")
+    timing_payload = dict(existing_timings or {}) if isinstance(existing_timings, Mapping) else {}
+    timing_payload["answer_cache_lookup_ms"] = round(lookup_ms, 3)
+    timing_payload["total_ms"] = round(lookup_ms, 3)
+    payload["timings"] = timing_payload
+    return payload
+
+
+def _add_source_count_note(
+    payload: dict[str, Any],
+    *,
+    requested_top_n: int,
+    diagnostics: Mapping[str, Any] | None = None,
+    log_pipeline: bool = False,
+) -> None:
+    sources = payload.get("sources", []) or []
+    if not isinstance(sources, list):
+        return
+    if len(sources) >= max(1, int(requested_top_n)):
+        payload.pop("source_count_note", None)
+        return
+
+    requested_count = max(1, int(requested_top_n))
+    note = f"Only {len(sources)} unique papers were available for this query."
+    diagnostics_map = dict(diagnostics or {}) if isinstance(diagnostics, Mapping) else {}
+    if diagnostics_map:
+        if int(diagnostics_map.get("esearch_pmids_len", 0) or 0) < requested_count:
+            note = f"PubMed returned fewer than {requested_count} records."
+        elif int(diagnostics_map.get("records_len", 0) or 0) < requested_count:
+            note = f"PubMed returned fewer than {requested_count} records."
+        elif int(diagnostics_map.get("missing_record_pmids", 0) or 0) > 0 or int(
+            diagnostics_map.get("missing_document_pmids", 0) or 0
+        ) > 0:
+            note = "Some records missing PMID metadata."
+        elif int(diagnostics_map.get("duplicate_record_pmids", 0) or 0) > 0 or int(
+            diagnostics_map.get("duplicate_document_pmids", 0) or 0
+        ) > 0:
+            note = "Duplicate PMIDs removed."
+
+    payload["source_count_note"] = note
+    _pipeline_log(
+        log_pipeline,
+        "[PIPELINE] Source shortfall | requested_top_n=%s sources_len=%s note=%s esearch_pmids_len=%s fetched_pmids_len=%s records_len=%s unique_record_pmids=%s missing_record_pmids=%s duplicate_record_pmids=%s documents_len=%s unique_document_pmids=%s missing_document_pmids=%s duplicate_document_pmids=%s",
+        requested_count,
+        len(sources),
+        note,
+        diagnostics_map.get("esearch_pmids_len", 0),
+        diagnostics_map.get("fetched_pmids_len", 0),
+        diagnostics_map.get("records_len", 0),
+        diagnostics_map.get("unique_record_pmids", 0),
+        diagnostics_map.get("missing_record_pmids", 0),
+        diagnostics_map.get("duplicate_record_pmids", 0),
+        diagnostics_map.get("documents_len", 0),
+        diagnostics_map.get("unique_document_pmids", 0),
+        diagnostics_map.get("missing_document_pmids", 0),
+        diagnostics_map.get("duplicate_document_pmids", 0),
+    )
+
+
+def _answer_cache_enabled(config: Any) -> bool:
+    return bool(
+        hasattr(config, "data_dir")
+        and hasattr(config, "answer_cache_ttl_seconds")
+        and hasattr(config, "answer_cache_min_similarity")
+    )
 
 
 def _docs_to_eval_contexts(
@@ -908,8 +1507,8 @@ def _docs_to_eval_contexts(
     top_n: int,
 ) -> list[dict[str, str]]:
     return build_context_rows(
-        select_context_documents(docs, max_abstracts=min(top_n, config.max_abstracts)),
-        max_abstracts=min(top_n, config.max_abstracts),
+        select_context_documents(docs, max_abstracts=top_n),
+        max_abstracts=top_n,
         max_context_tokens=config.max_context_tokens,
         trim_strategy=config.context_trim_strategy,
     )
@@ -925,7 +1524,8 @@ def _build_retriever(
     log_pipeline: bool = False,
     reranker_resources: Any | None = None,
 ):
-    candidate_k = max(top_n, min(20, top_n * 2 if hybrid_retrieval else top_n))
+    needs_expanded_candidates = bool(use_reranker or hybrid_retrieval)
+    candidate_k = min(50, max(top_n, (top_n * 3) if needs_expanded_candidates else top_n))
     retriever = _PipelineRetriever(
         abstract_store=abstract_store,
         candidate_k=candidate_k,
@@ -952,6 +1552,15 @@ def _sanitize_top_n(top_n: int) -> int:
     except (TypeError, ValueError):
         return 10
     return max(1, min(10, value))
+
+
+def _resolve_context_top_k(config: Any, requested_top_n: int) -> int:
+    raw_value = getattr(config, "max_context_abstracts", getattr(config, "max_abstracts", requested_top_n))
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = requested_top_n
+    return max(1, min(int(requested_top_n), parsed))
 
 
 def _get_llm_safe(config: AppConfig | None = None):
@@ -1015,9 +1624,15 @@ def _is_followup_query(normalized_query: str) -> bool:
     return False
 
 
-def _get_history_excerpt(session_id: str, max_messages: int = 6, max_chars: int = 1000) -> str:
+def _get_history_excerpt(
+    session_id: str,
+    *,
+    branch_id: str = "main",
+    max_messages: int = 6,
+    max_chars: int = 1000,
+) -> str:
     try:
-        history = get_session_history(session_id)
+        history = get_session_history(session_id, branch_id)
     except Exception:
         return ""
 
@@ -1036,9 +1651,14 @@ def _get_history_excerpt(session_id: str, max_messages: int = 6, max_chars: int 
     return text
 
 
-def _get_last_assistant_excerpt(session_id: str, max_chars: int = 240) -> str:
+def _get_last_assistant_excerpt(
+    session_id: str,
+    *,
+    branch_id: str = "main",
+    max_chars: int = 240,
+) -> str:
     try:
-        history = get_session_history(session_id)
+        history = get_session_history(session_id, branch_id)
     except Exception:
         return ""
 
@@ -1076,6 +1696,8 @@ def _run_optional_validation(
     answer: str,
     retrieved_docs: list,
     sources: list[SourceItem],
+    context_top_k: int,
+    compute_device: str | None = None,
 ) -> Dict[str, Any]:
     if not getattr(config, "validator_enabled", False):
         return {}
@@ -1085,7 +1707,7 @@ def _run_optional_validation(
     context = (
         _format_docs(
             retrieved_docs,
-            max_abstracts=config.max_abstracts,
+            max_abstracts=context_top_k,
             max_context_tokens=config.max_context_tokens,
             trim_strategy=config.context_trim_strategy,
         )
@@ -1109,6 +1731,7 @@ def _run_optional_validation(
         top_n_chunks=int(getattr(config, "validator_top_n_chunks", 4)),
         top_k_sentences=int(getattr(config, "validator_top_k_sentences", 2)),
         retrieved_docs=retrieved_docs,
+        device=compute_device,
     )
     _pipeline_log(
         getattr(config, "log_pipeline", False),
@@ -1173,6 +1796,7 @@ def _log_request_success(
     config: AppConfig,
     request_id: str,
     session_id: str,
+    branch_id: str,
     query: str,
     payload: Mapping[str, Any],
     cache_hit: bool,
@@ -1185,6 +1809,7 @@ def _log_request_success(
         "request.complete",
         request_id=request_id,
         session_id=session_id,
+        branch_id=branch_id,
         query_hash=hash_query_text(query),
         status=str(payload.get("status", "")),
         provider="nvidia" if config.nvidia_api_key else None,
@@ -1205,6 +1830,7 @@ def _log_request_error(
     config: AppConfig,
     request_id: str,
     session_id: str,
+    branch_id: str,
     query: str,
     started_at: float,
     error: Exception,
@@ -1213,6 +1839,7 @@ def _log_request_error(
         "request.error",
         request_id=request_id,
         session_id=session_id,
+        branch_id=branch_id,
         query_hash=hash_query_text(query),
         error_type=error.__class__.__name__,
         error_message=str(error),
@@ -1233,3 +1860,15 @@ def _trim_text(text: str, limit: int = 140) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit].rstrip() + "..."
+
+
+def _elapsed_ms(started_at: float) -> float:
+    if started_at <= 0:
+        return 0.0
+    return round((perf_counter() - started_at) * 1000.0, 3)
+
+
+def _phase_elapsed_ms(phase_started_at: float, request_started_at: float) -> float:
+    if request_started_at <= 0:
+        return 0.0
+    return round((perf_counter() - phase_started_at) * 1000.0, 3)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from langchain_core.runnables.utils import ConfigurableFieldSpec
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
 from src.history import get_session_history
@@ -85,6 +86,24 @@ def build_chat_chain(base_chain):
         get_session_history,
         input_messages_key="input",
         history_messages_key="chat_history",
+        history_factory_config=[
+            ConfigurableFieldSpec(
+                id="session_id",
+                annotation=str,
+                name="Session ID",
+                description="Unique identifier for the chat session.",
+                default="",
+                is_shared=True,
+            ),
+            ConfigurableFieldSpec(
+                id="branch_id",
+                annotation=str,
+                name="Branch ID",
+                description="Unique identifier for the active conversation branch.",
+                default="main",
+                is_shared=True,
+            ),
+        ],
     )
 
 

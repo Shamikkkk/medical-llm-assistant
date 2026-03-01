@@ -12,6 +12,7 @@ class SourceItem(TypedDict, total=False):
     doi: str
     pmcid: str
     fulltext_url: str
+    context: str
 
 
 class PipelineResponse(TypedDict, total=False):
@@ -40,3 +41,13 @@ class PipelineResponse(TypedDict, total=False):
     validation_issues: list[str]
     validation_confidence: str
     validation_suggested_fix: str
+    branch_id: str
+    answer_cache_hit: bool
+    answer_cache_match_type: str
+    answer_cache_created_at: str
+    answer_cache_similarity: float
+    answer_cache_query: str
+    answer_cache_config_match: bool
+    answer_cache_note: str
+    source_count_note: str
+    timings: dict[str, float]

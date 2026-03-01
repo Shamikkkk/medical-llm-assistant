@@ -10,15 +10,22 @@ from unittest.mock import patch
 PIPELINE_DEPS_AVAILABLE = importlib.util.find_spec("langchain_core") is not None
 
 
-def _config() -> SimpleNamespace:
+def _config(
+    *,
+    use_reranker: bool = True,
+    hybrid_retrieval: bool = False,
+    max_abstracts: int = 8,
+    max_context_abstracts: int | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         data_dir=Path("./data"),
         log_pipeline=False,
-        use_reranker=True,
-        max_abstracts=8,
+        use_reranker=use_reranker,
+        max_abstracts=max_abstracts,
+        max_context_abstracts=max_abstracts if max_context_abstracts is None else max_context_abstracts,
         max_context_tokens=2500,
         context_trim_strategy="truncate",
-        hybrid_retrieval=False,
+        hybrid_retrieval=hybrid_retrieval,
         hybrid_alpha=0.5,
         citation_alignment=False,
         alignment_mode="disclaim",
@@ -30,19 +37,44 @@ def _config() -> SimpleNamespace:
 
 
 def _doc():
+    return _make_doc(12345)
+
+
+def _make_doc(pmid: int):
     from langchain_core.documents import Document
 
     return Document(
-        page_content="Trial evidence\n\nTrial evidence abstract showing reduced stroke risk with therapy.",
+        page_content=(
+            f"Trial evidence {pmid}\n\n"
+            f"Trial evidence abstract showing reduced stroke risk with therapy for PMID {pmid}."
+        ),
         metadata={
-            "pmid": "12345",
-            "title": "Trial evidence",
+            "pmid": str(pmid),
+            "title": f"Trial evidence {pmid}",
             "journal": "Test Journal",
             "year": "2024",
-            "doi": "10.1000/12345",
-            "fulltext_url": "https://pubmed.ncbi.nlm.nih.gov/12345/",
+            "doi": f"10.1000/{pmid}",
+            "fulltext_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
         },
     )
+
+
+def _make_docs(count: int) -> list:
+    return [_make_doc(10000 + index) for index in range(count)]
+
+
+def _make_records(count: int) -> list[dict]:
+    return [
+        {
+            "pmid": str(10000 + index),
+            "title": f"Trial evidence {10000 + index}",
+            "journal": "Test Journal",
+            "year": "2024",
+            "doi": f"10.1000/{10000 + index}",
+            "fulltext_url": f"https://pubmed.ncbi.nlm.nih.gov/{10000 + index}/",
+        }
+        for index in range(count)
+    ]
 
 
 class _FakeRetriever:
@@ -92,6 +124,15 @@ class _RecordingExecutor:
         return _ImmediateFuture(fn(*args, **kwargs))
 
 
+class _FakeAbstractStore:
+    def __init__(self, docs: list) -> None:
+        self._docs = list(docs)
+
+    def as_retriever(self, search_kwargs=None):
+        del search_kwargs
+        return _FakeRetriever(self._docs)
+
+
 def _collect_stream(generator) -> tuple[list[str], dict]:
     chunks: list[str] = []
     while True:
@@ -121,6 +162,7 @@ class PipelineEnhancementTests(TestCase):
             "docs_preview": [],
             "cache_hit": False,
             "cache_status": "miss",
+            "context_top_k": 4,
             "retrieval_ms": 12.5,
         }
 
@@ -163,6 +205,7 @@ class PipelineEnhancementTests(TestCase):
             "docs_preview": [],
             "cache_hit": False,
             "cache_status": "miss",
+            "context_top_k": 4,
             "retrieval_ms": 12.5,
         }
 
@@ -224,7 +267,7 @@ class PipelineEnhancementTests(TestCase):
             patch("src.core.pipeline.rewrite_to_pubmed_query", return_value="trial evidence"),
             patch(
                 "src.core.pipeline._fetch_pubmed_records",
-                return_value=(["12345"], records, docs),
+                return_value=(["12345"], ["12345"], records, docs),
             ) as mock_fetch_records,
             patch("src.core.pipeline.remember_query_result"),
             patch("src.core.pipeline.upsert_abstracts", return_value=1),
@@ -248,6 +291,109 @@ class PipelineEnhancementTests(TestCase):
         self.assertIn(mock_fetch_records, submitted)
         self.assertEqual(result["cache_status"], "miss")
         self.assertEqual(result["abstracts_fetched"], 1)
+        self.assertEqual(result["context_top_k"], 4)
+
+    def test_build_docs_preview_returns_requested_unique_count(self) -> None:
+        from src.core.pipeline import _build_docs_preview
+
+        preview = _build_docs_preview(_make_records(10), top_n=10)
+
+        self.assertEqual(len(preview), 10)
+        self.assertEqual(len({item["pmid"] for item in preview}), 10)
+
+    def test_prepare_chat_context_invalidates_undersized_cache_hit(self) -> None:
+        from src.core.pipeline import _prepare_chat_context
+        from src.core.scope import ScopeResult
+
+        config = _config(use_reranker=False, max_abstracts=8)
+        scope = ScopeResult("BIOMEDICAL", True, "ok", None, None)
+        cached_pmids = [str(10000 + index) for index in range(8)]
+        refreshed_records = _make_records(12)
+        refreshed_pmids = [record["pmid"] for record in refreshed_records]
+        refreshed_docs = _make_docs(12)
+        abstract_store = _FakeAbstractStore(refreshed_docs)
+
+        with (
+            patch(
+                "src.core.pipeline.lookup_query_result_cache",
+                return_value={"pubmed_query": "trial evidence", "pmids": cached_pmids},
+            ),
+            patch("src.core.pipeline.get_query_cache_store", return_value=object()),
+            patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
+            patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
+            patch("src.core.pipeline.pubmed_esearch", return_value=refreshed_pmids) as mock_esearch,
+            patch("src.core.pipeline.pubmed_efetch", return_value=refreshed_records),
+            patch("src.core.pipeline.to_documents", return_value=refreshed_docs),
+            patch("src.core.pipeline.remember_query_result") as mock_remember,
+            patch("src.core.pipeline.upsert_abstracts", return_value=12),
+            patch("src.core.pipeline.build_contextual_retrieval_query", return_value="trial evidence"),
+            patch("src.core.pipeline._build_retriever", return_value=(object(), False)),
+        ):
+            result = _prepare_chat_context(
+                query="sample question",
+                session_id="session-1",
+                top_n=10,
+                llm=object(),
+                scope=scope,
+                config=config,
+                request_id="req-cache-refresh",
+                executor_factory=lambda **_kwargs: _RecordingExecutor([]),
+            )
+
+        self.assertEqual(result["cache_status"], "miss")
+        self.assertFalse(result["cache_hit"])
+        self.assertEqual(len(result["docs_preview"]), 10)
+        self.assertEqual(result["abstracts_fetched"], 12)
+        self.assertGreaterEqual(mock_esearch.call_args.kwargs["retmax"], 10)
+        mock_remember.assert_called_once()
+        self.assertEqual(
+            mock_remember.call_args.kwargs["pmids"],
+            refreshed_pmids,
+        )
+
+    def test_prepare_chat_context_keeps_satisfied_cache_hit_without_refresh(self) -> None:
+        from src.core.pipeline import _prepare_chat_context
+        from src.core.scope import ScopeResult
+
+        config = _config(use_reranker=False, max_abstracts=8)
+        scope = ScopeResult("BIOMEDICAL", True, "ok", None, None)
+        cached_records = _make_records(10)
+        cached_pmids = [record["pmid"] for record in cached_records]
+        cached_docs = _make_docs(10)
+        abstract_store = _FakeAbstractStore(cached_docs)
+
+        with (
+            patch(
+                "src.core.pipeline.lookup_query_result_cache",
+                return_value={"pubmed_query": "trial evidence", "pmids": cached_pmids},
+            ),
+            patch("src.core.pipeline.get_query_cache_store", return_value=object()),
+            patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
+            patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
+            patch("src.core.pipeline.pubmed_esearch") as mock_esearch,
+            patch("src.core.pipeline.pubmed_efetch", return_value=cached_records),
+            patch("src.core.pipeline.to_documents", return_value=cached_docs),
+            patch("src.core.pipeline.remember_query_result") as mock_remember,
+            patch("src.core.pipeline.upsert_abstracts", return_value=10),
+            patch("src.core.pipeline.build_contextual_retrieval_query", return_value="trial evidence"),
+            patch("src.core.pipeline._build_retriever", return_value=(object(), False)),
+        ):
+            result = _prepare_chat_context(
+                query="sample question",
+                session_id="session-1",
+                top_n=10,
+                llm=object(),
+                scope=scope,
+                config=config,
+                request_id="req-cache-hit",
+                executor_factory=lambda **_kwargs: _RecordingExecutor([]),
+            )
+
+        self.assertEqual(result["cache_status"], "hit")
+        self.assertTrue(result["cache_hit"])
+        self.assertEqual(len(result["docs_preview"]), 10)
+        mock_esearch.assert_not_called()
+        mock_remember.assert_not_called()
 
     def test_invoke_chat_impl_respects_show_papers_toggle(self) -> None:
         with_links = self._invoke_with_patches(include_paper_links=True)
@@ -257,3 +403,264 @@ class PipelineEnhancementTests(TestCase):
         self.assertIn("fulltext_url", with_links["sources"][0])
         self.assertNotIn("doi", without_links["sources"][0])
         self.assertNotIn("fulltext_url", without_links["sources"][0])
+
+    def test_invoke_chat_impl_adds_source_count_note_when_sources_short(self) -> None:
+        payload = self._invoke_with_patches(include_paper_links=True)
+
+        self.assertEqual(
+            payload.get("source_count_note"),
+            "Only 1 unique papers were available for this query.",
+        )
+
+    def test_top_n_10_is_not_capped_by_max_abstracts_in_invoke_path(self) -> None:
+        from src.core.pipeline import _invoke_chat_impl
+        from src.core.scope import ScopeResult
+
+        docs = _make_docs(12)
+        records = _make_records(12)
+        pmids = [record["pmid"] for record in records]
+        config = _config(use_reranker=False, max_abstracts=8)
+        scope = ScopeResult("BIOMEDICAL", True, "ok", None, None)
+        abstract_store = _FakeAbstractStore(docs)
+
+        with (
+            patch("src.core.pipeline._get_llm_safe", return_value=object()),
+            patch("src.core.pipeline.classify_intent_details", return_value={"label": "medical", "confidence": 0.8}),
+            patch("src.core.pipeline.classify_scope", return_value=scope),
+            patch("src.core.pipeline.get_query_cache_store", return_value=object()),
+            patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
+            patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
+            patch("src.core.pipeline.lookup_query_result_cache", return_value=None),
+            patch("src.core.pipeline.rewrite_to_pubmed_query", return_value="trial evidence"),
+            patch("src.core.pipeline.pubmed_esearch", return_value=pmids) as mock_esearch,
+            patch("src.core.pipeline.pubmed_efetch", return_value=records),
+            patch("src.core.pipeline.to_documents", return_value=docs),
+            patch("src.core.pipeline.remember_query_result"),
+            patch("src.core.pipeline.upsert_abstracts", return_value=12),
+            patch("src.core.pipeline.build_rag_chain", return_value=object()) as mock_build_rag_chain,
+            patch("src.core.pipeline.build_chat_chain", return_value=_FakeInvokeChain()),
+            patch("src.core.pipeline.log_llm_usage", return_value={}),
+            patch("src.core.pipeline.store_answer_cache"),
+            patch("src.core.pipeline._run_optional_validation", return_value={}),
+            patch("src.core.pipeline._log_request_success"),
+            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+        ):
+            payload = _invoke_chat_impl(
+                query="sample question",
+                session_id="session-1",
+                top_n=10,
+                config=config,
+                request_id="req-top10",
+                include_paper_links=True,
+                start_time=0.0,
+            )
+
+        self.assertEqual(payload["status"], "answered")
+        self.assertEqual(len(payload["sources"]), 10)
+        self.assertEqual(len(payload["docs_preview"]), 10)
+        self.assertEqual(len(payload["retrieved_contexts"]), 10)
+        self.assertNotIn("source_count_note", payload)
+        self.assertGreaterEqual(mock_esearch.call_args.kwargs["retmax"], 10)
+        self.assertEqual(mock_build_rag_chain.call_args.kwargs["max_abstracts"], 8)
+
+    def test_top_n_10_is_not_capped_by_max_abstracts_in_stream_path(self) -> None:
+        from src.core.pipeline import _stream_chat_impl
+        from src.core.scope import ScopeResult
+
+        docs = _make_docs(12)
+        records = _make_records(12)
+        pmids = [record["pmid"] for record in records]
+        config = _config(use_reranker=False, max_abstracts=8)
+        scope = ScopeResult("BIOMEDICAL", True, "ok", None, None)
+        abstract_store = _FakeAbstractStore(docs)
+
+        with (
+            patch("src.core.pipeline._get_llm_safe", return_value=object()),
+            patch("src.core.pipeline.classify_intent_details", return_value={"label": "medical", "confidence": 0.8}),
+            patch("src.core.pipeline.classify_scope", return_value=scope),
+            patch("src.core.pipeline.get_query_cache_store", return_value=object()),
+            patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
+            patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
+            patch("src.core.pipeline.lookup_query_result_cache", return_value=None),
+            patch("src.core.pipeline.rewrite_to_pubmed_query", return_value="trial evidence"),
+            patch("src.core.pipeline.pubmed_esearch", return_value=pmids),
+            patch("src.core.pipeline.pubmed_efetch", return_value=records),
+            patch("src.core.pipeline.to_documents", return_value=docs),
+            patch("src.core.pipeline.remember_query_result"),
+            patch("src.core.pipeline.upsert_abstracts", return_value=12),
+            patch("src.core.pipeline.build_rag_chain", return_value=object()) as mock_build_rag_chain,
+            patch("src.core.pipeline.build_chat_chain", return_value=_FakeStreamingChain()),
+            patch("src.core.pipeline.log_llm_usage", return_value={}),
+            patch("src.core.pipeline.store_answer_cache"),
+            patch("src.core.pipeline._run_optional_validation", return_value={}),
+            patch("src.core.pipeline._log_request_success"),
+            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+        ):
+            stream = _stream_chat_impl(
+                query="sample question",
+                session_id="session-1",
+                top_n=10,
+                config=config,
+                request_id="req-top10-stream",
+                include_paper_links=True,
+                start_time=0.0,
+            )
+            chunks, payload = _collect_stream(stream)
+
+        self.assertEqual(chunks, ["First chunk", " second chunk"])
+        self.assertEqual(payload["status"], "answered")
+        self.assertEqual(len(payload["sources"]), 10)
+        self.assertEqual(len(payload["docs_preview"]), 10)
+        self.assertEqual(len(payload["retrieved_contexts"]), 10)
+        self.assertNotIn("source_count_note", payload)
+        self.assertEqual(mock_build_rag_chain.call_args.kwargs["max_abstracts"], 8)
+
+    def test_top_n_shortfall_returns_available_unique_papers_and_note(self) -> None:
+        from src.core.pipeline import _invoke_chat_impl
+        from src.core.scope import ScopeResult
+
+        docs = _make_docs(6)
+        records = _make_records(6)
+        pmids = [record["pmid"] for record in records]
+        config = _config(use_reranker=False, max_abstracts=8)
+        scope = ScopeResult("BIOMEDICAL", True, "ok", None, None)
+        abstract_store = _FakeAbstractStore(docs)
+
+        with (
+            patch("src.core.pipeline._get_llm_safe", return_value=object()),
+            patch("src.core.pipeline.classify_intent_details", return_value={"label": "medical", "confidence": 0.8}),
+            patch("src.core.pipeline.classify_scope", return_value=scope),
+            patch("src.core.pipeline.get_query_cache_store", return_value=object()),
+            patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
+            patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
+            patch("src.core.pipeline.lookup_query_result_cache", return_value=None),
+            patch("src.core.pipeline.rewrite_to_pubmed_query", return_value="trial evidence"),
+            patch("src.core.pipeline.pubmed_esearch", return_value=pmids),
+            patch("src.core.pipeline.pubmed_efetch", return_value=records),
+            patch("src.core.pipeline.to_documents", return_value=docs),
+            patch("src.core.pipeline.remember_query_result"),
+            patch("src.core.pipeline.upsert_abstracts", return_value=6),
+            patch("src.core.pipeline.build_rag_chain", return_value=object()),
+            patch("src.core.pipeline.build_chat_chain", return_value=_FakeInvokeChain()),
+            patch("src.core.pipeline.log_llm_usage", return_value={}),
+            patch("src.core.pipeline.store_answer_cache"),
+            patch("src.core.pipeline._run_optional_validation", return_value={}),
+            patch("src.core.pipeline._log_request_success"),
+            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+        ):
+            payload = _invoke_chat_impl(
+                query="sample question",
+                session_id="session-1",
+                top_n=10,
+                config=config,
+                request_id="req-top10-shortfall",
+                include_paper_links=True,
+                start_time=0.0,
+            )
+
+        self.assertEqual(payload["status"], "answered")
+        self.assertEqual(len(payload["sources"]), 6)
+        self.assertEqual(len(payload["docs_preview"]), 6)
+        self.assertEqual(
+            payload.get("source_count_note"),
+            "PubMed returned fewer than 10 records.",
+        )
+
+    def test_cached_eight_pmids_do_not_cap_top_n_ten_sources(self) -> None:
+        from src.core.pipeline import _invoke_chat_impl
+        from src.core.scope import ScopeResult
+
+        docs = _make_docs(10)
+        records = _make_records(10)
+        cached_pmids = [str(20000 + index) for index in range(8)]
+        refreshed_pmids = [record["pmid"] for record in records]
+        config = _config(use_reranker=False, max_abstracts=8)
+        scope = ScopeResult("BIOMEDICAL", True, "ok", None, None)
+        abstract_store = _FakeAbstractStore(docs)
+
+        with (
+            patch("src.core.pipeline._get_llm_safe", return_value=object()),
+            patch("src.core.pipeline.classify_intent_details", return_value={"label": "medical", "confidence": 0.8}),
+            patch("src.core.pipeline.classify_scope", return_value=scope),
+            patch(
+                "src.core.pipeline.lookup_query_result_cache",
+                return_value={"pubmed_query": "trial evidence", "pmids": cached_pmids},
+            ),
+            patch("src.core.pipeline.get_query_cache_store", return_value=object()),
+            patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
+            patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
+            patch("src.core.pipeline.pubmed_esearch", return_value=refreshed_pmids) as mock_esearch,
+            patch("src.core.pipeline.pubmed_efetch", return_value=records),
+            patch("src.core.pipeline.to_documents", return_value=docs),
+            patch("src.core.pipeline.remember_query_result"),
+            patch("src.core.pipeline.upsert_abstracts", return_value=10),
+            patch("src.core.pipeline.build_rag_chain", return_value=object()),
+            patch("src.core.pipeline.build_chat_chain", return_value=_FakeInvokeChain()),
+            patch("src.core.pipeline.log_llm_usage", return_value={}),
+            patch("src.core.pipeline.store_answer_cache"),
+            patch("src.core.pipeline._run_optional_validation", return_value={}),
+            patch("src.core.pipeline._log_request_success"),
+            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+        ):
+            payload = _invoke_chat_impl(
+                query="sample question",
+                session_id="session-1",
+                top_n=10,
+                config=config,
+                request_id="req-cache-top10",
+                include_paper_links=True,
+                start_time=0.0,
+            )
+
+        self.assertEqual(payload["status"], "answered")
+        self.assertEqual(len(payload["docs_preview"]), 10)
+        self.assertEqual(len(payload["sources"]), 10)
+        self.assertGreaterEqual(mock_esearch.call_args.kwargs["retmax"], 10)
+
+    def test_sources_are_backfilled_from_docs_preview_when_retriever_returns_fewer_docs(self) -> None:
+        from src.core.pipeline import _invoke_chat_impl
+        from src.core.scope import ScopeResult
+
+        retrieved_docs = _make_docs(8)
+        fetched_records = _make_records(10)
+        pmids = [record["pmid"] for record in fetched_records]
+        config = _config(use_reranker=False, max_abstracts=8)
+        scope = ScopeResult("BIOMEDICAL", True, "ok", None, None)
+        abstract_store = _FakeAbstractStore(retrieved_docs)
+
+        with (
+            patch("src.core.pipeline._get_llm_safe", return_value=object()),
+            patch("src.core.pipeline.classify_intent_details", return_value={"label": "medical", "confidence": 0.8}),
+            patch("src.core.pipeline.classify_scope", return_value=scope),
+            patch("src.core.pipeline.get_query_cache_store", return_value=object()),
+            patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
+            patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
+            patch("src.core.pipeline.lookup_query_result_cache", return_value=None),
+            patch("src.core.pipeline.rewrite_to_pubmed_query", return_value="trial evidence"),
+            patch("src.core.pipeline.pubmed_esearch", return_value=pmids),
+            patch("src.core.pipeline.pubmed_efetch", return_value=fetched_records),
+            patch("src.core.pipeline.to_documents", return_value=retrieved_docs),
+            patch("src.core.pipeline.remember_query_result"),
+            patch("src.core.pipeline.upsert_abstracts", return_value=8),
+            patch("src.core.pipeline.build_rag_chain", return_value=object()),
+            patch("src.core.pipeline.build_chat_chain", return_value=_FakeInvokeChain()),
+            patch("src.core.pipeline.log_llm_usage", return_value={}),
+            patch("src.core.pipeline.store_answer_cache"),
+            patch("src.core.pipeline._run_optional_validation", return_value={}),
+            patch("src.core.pipeline._log_request_success"),
+            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+        ):
+            payload = _invoke_chat_impl(
+                query="sample question",
+                session_id="session-1",
+                top_n=10,
+                config=config,
+                request_id="req-backfill",
+                include_paper_links=True,
+                start_time=0.0,
+            )
+
+        self.assertEqual(payload["status"], "answered")
+        self.assertEqual(len(payload["docs_preview"]), 10)
+        self.assertEqual(len(payload["sources"]), 10)
+        self.assertEqual(payload["sources"][-1]["pmid"], fetched_records[-1]["pmid"])

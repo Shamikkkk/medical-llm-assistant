@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Callable
+from time import perf_counter
+from typing import Any, Callable, Mapping
 import logging
 
 from src.agent.state import AgentState
@@ -17,6 +18,13 @@ from src.agent.tools import (
 )
 from src.core.config import load_config
 from src.integrations.nvidia import get_nvidia_llm
+from src.integrations.storage import (
+    build_answer_cache_fingerprint,
+    get_answer_cache_store,
+    lookup_answer_cache,
+    store_answer_cache,
+)
+from src.logging_utils import hash_query_text, log_event
 from src.types import PipelineResponse
 from src.validators import validate_answer
 
@@ -26,28 +34,73 @@ LOGGER = logging.getLogger("agent.orchestrator")
 def invoke_agent_chat(
     query: str,
     session_id: str,
+    branch_id: str = "main",
     top_n: int = 10,
     *,
     request_id: str | None = None,
     include_paper_links: bool = True,
+    compute_device: str | None = None,
 ) -> PipelineResponse:
     config = load_config()
+    current_request_id = request_id or ""
+    start_time = perf_counter()
     llm = _get_llm_safe()
     safe_top_n = _sanitize_top_n(top_n)
+    answer_cache_store = get_answer_cache_store(
+        str(config.data_dir / "chroma"),
+        embeddings_device=compute_device,
+    )
+    answer_cache_fingerprint = build_answer_cache_fingerprint(
+        config=config,
+        top_n=safe_top_n,
+        include_paper_links=include_paper_links,
+        backend="agent",
+    )
+    answer_cache_lookup_start = perf_counter()
+    cached_answer = lookup_answer_cache(
+        query,
+        store=answer_cache_store,
+        config_fingerprint=answer_cache_fingerprint,
+        ttl_seconds=int(getattr(config, "answer_cache_ttl_seconds", 604800)),
+        min_similarity=float(getattr(config, "answer_cache_min_similarity", 0.9)),
+        strict_fingerprint=bool(getattr(config, "answer_cache_strict_fingerprint", True)),
+    )
+    answer_cache_lookup_ms = (perf_counter() - answer_cache_lookup_start) * 1000.0
+    if cached_answer is not None:
+        payload = _build_cached_answer_payload(
+            cached_answer,
+            request_id=current_request_id,
+            query=query,
+            branch_id=branch_id,
+            lookup_ms=answer_cache_lookup_ms,
+        )
+        _log_agent_request(
+            config=config,
+            request_id=current_request_id,
+            session_id=session_id,
+            branch_id=branch_id,
+            query=query,
+            payload=payload,
+            started_at=start_time,
+        )
+        return payload
+
     initial: AgentState = {
         "query": query,
         "session_id": session_id,
+        "branch_id": branch_id,
         "top_n": safe_top_n,
         "llm": llm,
         "persist_dir": str(config.data_dir / "chroma"),
         "use_reranker": bool(config.use_reranker),
         "log_pipeline": bool(config.log_pipeline),
+        "compute_device": str(compute_device or "cpu"),
     }
 
     state = _run_agent(initial, use_langgraph=bool(config.agent_use_langgraph))
     payload = _state_to_payload(
         state,
-        request_id=request_id,
+        request_id=current_request_id,
         include_paper_links=include_paper_links,
     )
     payload.update(
@@ -57,7 +110,30 @@ def invoke_agent_chat(
             answer=str(payload.get("answer", "") or ""),
             contexts=state.get("retrieved_contexts", []) or [],
             sources=payload.get("sources", []) or [],
+            compute_device=compute_device,
         )
+    )
+    timings = dict(payload.get("timings", {}) or {})
+    timings.setdefault("answer_cache_lookup_ms", round(answer_cache_lookup_ms, 3))
+    timings["total_ms"] = round((perf_counter() - start_time) * 1000.0, 3)
+    payload["timings"] = timings
+    payload["branch_id"] = branch_id
+    store_answer_cache(
+        query,
+        response_payload=payload,
+        config_fingerprint=answer_cache_fingerprint,
+        store=answer_cache_store,
+        model_id=str(getattr(config, "nvidia_model", "") or ""),
+        backend="agent",
+    )
+    _log_agent_request(
+        config=config,
+        request_id=current_request_id,
+        session_id=session_id,
+        branch_id=branch_id,
+        query=query,
+        payload=payload,
+        started_at=start_time,
     )
     return payload
 
@@ -65,14 +141,60 @@ def invoke_agent_chat(
 def stream_agent_chat(
     query: str,
     session_id: str,
+    branch_id: str = "main",
     top_n: int = 10,
     *,
     request_id: str | None = None,
     include_paper_links: bool = True,
+    compute_device: str | None = None,
 ):
     config = load_config()
+    current_request_id = request_id or ""
+    start_time = perf_counter()
     llm = _get_llm_safe()
     safe_top_n = _sanitize_top_n(top_n)
+    answer_cache_store = get_answer_cache_store(
+        str(config.data_dir / "chroma"),
+        embeddings_device=compute_device,
+    )
+    answer_cache_fingerprint = build_answer_cache_fingerprint(
+        config=config,
+        top_n=safe_top_n,
+        include_paper_links=include_paper_links,
+        backend="agent",
+    )
+    answer_cache_lookup_start = perf_counter()
+    cached_answer = lookup_answer_cache(
+        query,
+        store=answer_cache_store,
+        config_fingerprint=answer_cache_fingerprint,
+        ttl_seconds=int(getattr(config, "answer_cache_ttl_seconds", 604800)),
+        min_similarity=float(getattr(config, "answer_cache_min_similarity", 0.9)),
+        strict_fingerprint=bool(getattr(config, "answer_cache_strict_fingerprint", True)),
+    )
+    answer_cache_lookup_ms = (perf_counter() - answer_cache_lookup_start) * 1000.0
+    if cached_answer is not None:
+        payload = _build_cached_answer_payload(
+            cached_answer,
+            request_id=current_request_id,
+            query=query,
+            branch_id=branch_id,
+            lookup_ms=answer_cache_lookup_ms,
+        )
+        cached_text = str(payload.get("answer") or payload.get("message") or "")
+        if cached_text:
+            yield cached_text
+        _log_agent_request(
+            config=config,
+            request_id=current_request_id,
+            session_id=session_id,
+            branch_id=branch_id,
+            query=query,
+            payload=payload,
+            started_at=start_time,
+        )
+        return payload
+
     guard = safety_guardrail_tool(
         query,
         session_id=session_id,
@@ -97,7 +219,9 @@ def stream_agent_chat(
             "scope_message": getattr(scope, "user_message", message),
             "reframed_query": getattr(scope, "reframed_query", "") or "",
             "retrieved_contexts": [],
-            "request_id": request_id or "",
+            "branch_id": branch_id,
+            "request_id": current_request_id,
+            "timings": {"total_ms": round((perf_counter() - start_time) * 1000.0, 3)},
         }
 
     refinement = query_refinement_tool(
@@ -114,6 +238,7 @@ def stream_agent_chat(
         top_n=safe_top_n,
         persist_dir=str(config.data_dir / "chroma"),
         log_pipeline=bool(config.log_pipeline),
+        compute_device=compute_device,
     )
     retrieve = retriever_tool(
         abstract_store=search["abstract_store"],
@@ -131,8 +256,10 @@ def stream_agent_chat(
         query=query,
         retrieval_query=retrieval_query,
         session_id=session_id,
+        branch_id=branch_id,
         llm=llm,
         retriever=retrieve["retriever"],
+        context_top_k=int(search.get("context_top_k", safe_top_n) or safe_top_n),
     )
     answer_text = ""
     while True:
@@ -160,7 +287,12 @@ def stream_agent_chat(
         "intent_label": intent_label,
         "intent_confidence": intent_confidence,
         "retrieved_contexts": contexts,
-        "request_id": request_id or "",
+        "branch_id": branch_id,
+        "request_id": current_request_id,
+        "timings": {
+            "answer_cache_lookup_ms": round(answer_cache_lookup_ms, 3),
+            "total_ms": round((perf_counter() - start_time) * 1000.0, 3),
+        },
     }
     payload.update(
         _run_optional_validation(
@@ -169,7 +301,26 @@ def stream_agent_chat(
             answer=answer_text,
             contexts=contexts,
             sources=sources,
+            compute_device=compute_device,
         )
+    )
+    _add_source_count_note(payload, requested_top_n=safe_top_n)
+    store_answer_cache(
+        query,
+        response_payload=payload,
+        config_fingerprint=answer_cache_fingerprint,
+        store=answer_cache_store,
+        model_id=str(getattr(config, "nvidia_model", "") or ""),
+        backend="agent",
+    )
+    _log_agent_request(
+        config=config,
+        request_id=current_request_id,
+        session_id=session_id,
+        branch_id=branch_id,
+        query=query,
+        payload=payload,
+        started_at=start_time,
     )
     return payload
 
@@ -225,10 +376,12 @@ def _run_sequential(state: AgentState) -> AgentState:
         top_n=int(state["top_n"]),
         persist_dir=str(state["persist_dir"]),
         log_pipeline=bool(state.get("log_pipeline", False)),
+        compute_device=state.get("compute_device"),
     )
     state["pmids"] = [str(item) for item in search.get("pmids", [])]
     state["records"] = list(search.get("records", []))
     state["docs_preview"] = list(search.get("docs_preview", []))
+    state["context_top_k"] = int(search.get("context_top_k", state["top_n"]) or state["top_n"])
 
     retrieve = retriever_tool(
         abstract_store=search["abstract_store"],
@@ -246,8 +399,10 @@ def _run_sequential(state: AgentState) -> AgentState:
         query=state["query"],
         retrieval_query=state["retrieval_query"],
         session_id=state["session_id"],
+        branch_id=str(state.get("branch_id", "main") or "main"),
         llm=state.get("llm"),
         retriever=retrieve["retriever"],
+        context_top_k=int(state.get("context_top_k", state["top_n"]) or state["top_n"]),
     )
     state["answer"] = str(synthesis.get("answer", "") or "")
     state["status"] = "answered"
@@ -302,12 +457,14 @@ def _get_langgraph_runner() -> Callable[[AgentState], AgentState] | None:
             top_n=int(state["top_n"]),
             persist_dir=str(state["persist_dir"]),
             log_pipeline=bool(state.get("log_pipeline", False)),
+            compute_device=state.get("compute_device"),
         )
         return {
             "pmids": result["pmids"],
             "records": result["records"],
             "docs_preview": result["docs_preview"],
             "abstract_store": result["abstract_store"],
+            "context_top_k": int(result.get("context_top_k", state["top_n"]) or state["top_n"]),
         }
 
     def retrieve_node(state: AgentState) -> AgentState:
@@ -331,8 +488,10 @@ def _get_langgraph_runner() -> Callable[[AgentState], AgentState] | None:
             query=state["query"],
             retrieval_query=state["retrieval_query"],
             session_id=state["session_id"],
+            branch_id=str(state.get("branch_id", "main") or "main"),
             llm=state.get("llm"),
             retriever=state["retriever"],
+            context_top_k=int(state.get("context_top_k", state["top_n"]) or state["top_n"]),
         )
         return {"answer": str(result.get("answer", "") or ""), "status": "answered"}
 
@@ -382,14 +541,16 @@ def _state_to_payload(
             "scope_message": str(state.get("scope_message", "") or ""),
             "reframed_query": str(state.get("reframed_query", "") or ""),
             "retrieved_contexts": [],
+            "branch_id": str(state.get("branch_id", "main") or "main"),
             "request_id": request_id or "",
+            "timings": dict(state.get("timings", {}) or {}),
         }
 
     sources = _filter_source_links(
         list(state.get("sources", []) or []),
         include_paper_links=include_paper_links,
     )
-    return {
+    payload = {
         "status": "answered",
         "answer": str(state.get("answer", "") or ""),
         "query": str(state.get("query", "") or ""),
@@ -404,8 +565,22 @@ def _state_to_payload(
         "intent_label": str(state.get("intent_label", "medical")),
         "intent_confidence": float(state.get("intent_confidence", 0.0) or 0.0),
         "retrieved_contexts": list(state.get("retrieved_contexts", []) or []),
+        "branch_id": str(state.get("branch_id", "main") or "main"),
         "request_id": request_id or "",
+        "timings": dict(state.get("timings", {}) or {}),
     }
+    _add_source_count_note(payload, requested_top_n=int(state.get("top_n", 10) or 10))
+    return payload
+
+
+def _add_source_count_note(payload: dict[str, Any], *, requested_top_n: int) -> None:
+    sources = payload.get("sources", []) or []
+    if not isinstance(sources, list):
+        return
+    if len(sources) >= max(1, int(requested_top_n)):
+        payload.pop("source_count_note", None)
+        return
+    payload["source_count_note"] = f"Only {len(sources)} unique papers were available for this query."
 
 
 def _filter_source_links(
@@ -432,6 +607,7 @@ def _run_optional_validation(
     answer: str,
     contexts: list[dict[str, str]],
     sources: list[dict[str, Any]],
+    compute_device: str | None = None,
 ) -> dict[str, Any]:
     if not getattr(config, "validator_enabled", False):
         return {}
@@ -457,6 +633,7 @@ def _run_optional_validation(
         top_n_chunks=int(getattr(config, "validator_top_n_chunks", 4)),
         top_k_sentences=int(getattr(config, "validator_top_k_sentences", 2)),
         retrieved_docs=None,
+        device=compute_device,
     )
     if result.get("valid", True):
         return {}
@@ -470,6 +647,65 @@ def _run_optional_validation(
         "validation_issues": [str(item) for item in issues if str(item).strip()],
         "validation_confidence": f"{float(result.get('score', 0.0) or 0.0):.3f}",
     }
+
+
+def _build_cached_answer_payload(
+    cached_answer: dict[str, Any],
+    *,
+    request_id: str,
+    query: str,
+    branch_id: str,
+    lookup_ms: float,
+) -> PipelineResponse:
+    payload: PipelineResponse = dict(cached_answer.get("response_payload", {}) or {})
+    payload["query"] = query
+    payload["branch_id"] = branch_id
+    payload["request_id"] = request_id
+    payload["answer_cache_hit"] = True
+    payload["answer_cache_match_type"] = str(cached_answer.get("match_type", "similar") or "similar")
+    payload["answer_cache_created_at"] = str(cached_answer.get("created_at", "") or "")
+    payload["answer_cache_similarity"] = float(cached_answer.get("similarity", 0.0) or 0.0)
+    payload["answer_cache_query"] = str(cached_answer.get("matched_query", "") or "")
+    payload["answer_cache_config_match"] = bool(cached_answer.get("config_match", False))
+    payload["cache_hit"] = True
+    payload["cache_status"] = "answer_hit"
+    note = str(cached_answer.get("note", "") or "").strip()
+    if note:
+        payload["answer_cache_note"] = note
+    timings = dict(payload.get("timings", {}) or {})
+    timings["answer_cache_lookup_ms"] = round(lookup_ms, 3)
+    timings["total_ms"] = round(lookup_ms, 3)
+    payload["timings"] = timings
+    return payload
+
+
+def _log_agent_request(
+    *,
+    config: Any,
+    request_id: str,
+    session_id: str,
+    branch_id: str,
+    query: str,
+    payload: Mapping[str, Any],
+    started_at: float,
+) -> None:
+    timings = payload.get("timings")
+    timing_payload = dict(timings or {}) if isinstance(timings, dict) else {}
+    log_event(
+        "request.complete",
+        request_id=request_id,
+        session_id=session_id,
+        branch_id=branch_id,
+        query_hash=hash_query_text(query),
+        status=str(payload.get("status", "")),
+        provider="nvidia" if getattr(config, "nvidia_api_key", None) else None,
+        cache_hit=bool(payload.get("cache_hit", False) or payload.get("answer_cache_hit", False)),
+        pmid_count=len(payload.get("sources", []) or []),
+        retrieval_ms=timing_payload.get("retrieval_ms"),
+        llm_ms=timing_payload.get("llm_ms"),
+        total_ms=round((perf_counter() - started_at) * 1000.0, 3),
+        store_path=str(getattr(config, "metrics_store_path")) if getattr(config, "metrics_mode", False) else None,
+    )
 
 
 def _sanitize_top_n(top_n: int) -> int:

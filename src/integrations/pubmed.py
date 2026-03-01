@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 import requests
 from langchain_core.documents import Document
 
+from src.intent import normalize_user_query
 from src.logging_utils import log_llm_usage
 from src.papers.doi import build_doi_url, extract_doi
 
@@ -114,8 +115,9 @@ def to_documents(records: List[Dict[str, Any]]) -> List[Document]:
 
 def rewrite_to_pubmed_query(user_query: str, llm: Any | None) -> str:
     """Rewrite a user query into a concise PubMed-ready boolean query."""
+    normalized_query = normalize_user_query(user_query).strip() or user_query.strip()
     if not llm:
-        return user_query.strip()
+        return normalized_query
 
     prompt = (
         "You are a medical search assistant. Rewrite the user's question into a "
@@ -125,18 +127,18 @@ def rewrite_to_pubmed_query(user_query: str, llm: Any | None) -> str:
         "- Keep the topic domain-appropriate for the user question.\n"
         "- Keep it short (<= 200 characters if possible).\n"
         "- Output only the final query string, no quotes or extra text.\n"
-        f"User query: {user_query}\n"
+        f"User query: {normalized_query}\n"
     )
 
     rewritten = _invoke_llm(llm, prompt, usage_tag="rewrite")
     if not rewritten:
-        return user_query.strip()
+        return normalized_query
 
     cleaned = rewritten.strip().strip('"').strip("'")
     if "\n" in cleaned:
         cleaned = cleaned.splitlines()[0].strip()
     if not cleaned:
-        return user_query.strip()
+        return normalized_query
 
     if len(cleaned) > 200:
         cleaned = cleaned[:200].rstrip()

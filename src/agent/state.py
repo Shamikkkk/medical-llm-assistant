@@ -8,6 +8,7 @@ from src.types import SourceItem
 class AgentState(TypedDict, total=False):
     query: str
     session_id: str
+    branch_id: str
     top_n: int
     status: str
     intent_label: str
@@ -30,6 +31,8 @@ class AgentState(TypedDict, total=False):
     persist_dir: str
     use_reranker: bool
     log_pipeline: bool
+    compute_device: str
     scope: Any
     retriever: Any
     abstract_store: Any
+    timings: dict[str, float]

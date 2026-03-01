@@ -6,7 +6,12 @@ import re
 
 from src.core.chains import build_chat_chain, build_rag_chain
 from src.core.config import load_config
-from src.core.intent import classify_intent_details, smalltalk_reply
+from src.core.intent import (
+    classify_intent_details,
+    normalize_user_query,
+    should_short_circuit_smalltalk,
+    smalltalk_reply,
+)
 from src.core.scope import ScopeResult, classify_scope
 from src.integrations.pubmed import (
     pubmed_efetch,
@@ -43,10 +48,11 @@ def safety_guardrail_tool(
     llm: Any | None,
     log_pipeline: bool = False,
 ) -> dict[str, Any]:
-    intent = classify_intent_details(query, llm=llm, log_enabled=log_pipeline)
+    normalized_query = normalize_user_query(query)
+    intent = classify_intent_details(normalized_query, llm=llm, log_enabled=log_pipeline)
     intent_label = str(intent.get("label", "")).lower()
     intent_confidence = float(intent.get("confidence", 0.0) or 0.0)
-    if intent_label == "smalltalk":
+    if should_short_circuit_smalltalk(intent, normalized_query):
         return {
             "allow": False,
             "status": "smalltalk",
@@ -56,7 +62,7 @@ def safety_guardrail_tool(
             "scope": None,
         }
 
-    scope = classify_scope(query, session_id=session_id, llm=llm)
+    scope = classify_scope(normalized_query, session_id=session_id, llm=llm)
     if not scope.allow:
         return {
             "allow": False,
@@ -98,6 +104,7 @@ def query_refinement_tool(
     scope: ScopeResult,
     llm: Any | None,
 ) -> dict[str, str]:
+    normalized_query = normalize_user_query(query)
     if scope.reframed_query:
         return {
             "pubmed_query": scope.reframed_query,
@@ -105,8 +112,8 @@ def query_refinement_tool(
             "reframe_note": scope.user_message if scope.user_message != "ok" else "",
         }
 
-    pubmed_query = rewrite_to_pubmed_query(query, llm)
-    retrieval_query = pubmed_query or query
+    pubmed_query = rewrite_to_pubmed_query(normalized_query, llm)
+    retrieval_query = pubmed_query or normalized_query
     return {
         "pubmed_query": pubmed_query,
         "retrieval_query": retrieval_query,
@@ -121,11 +128,16 @@ def pubmed_search_tool(
     top_n: int,
     persist_dir: str,
     log_pipeline: bool = False,
+    compute_device: str | None = None,
 ) -> dict[str, Any]:
     config = load_config()
-    safe_top_n = min(_sanitize_top_n(top_n), int(config.max_abstracts))
-    cache_store = get_query_cache_store(persist_dir)
-    abstract_store = get_abstract_store(persist_dir)
+    requested_top_n = _sanitize_top_n(top_n)
+    context_top_k = _resolve_context_top_k(config, requested_top_n)
+    candidate_fetch_k = requested_top_n
+    if bool(getattr(config, "use_reranker", False)) or bool(getattr(config, "hybrid_retrieval", False)):
+        candidate_fetch_k = max(candidate_fetch_k, min(50, requested_top_n * 3))
+    cache_store = get_query_cache_store(persist_dir, embeddings_device=compute_device)
+    abstract_store = get_abstract_store(persist_dir, embeddings_device=compute_device)
 
     cached = lookup_query_result_cache(
         query,
@@ -141,19 +153,38 @@ def pubmed_search_tool(
 
     if use_cache:
         effective_pubmed_query = str(cached.get("pubmed_query") or pubmed_query or query)
-        pmids = [str(item) for item in (cached.get("pmids") or [])][:safe_top_n]
-        records = pubmed_efetch(pmids) if pmids else []
-        documents = to_documents(records)
-        cache_status = "hit"
+        cached_pmids = _normalize_pmids(cached.get("pmids") or [])
+        cached_requested_retmax = max(
+            len(cached_pmids),
+            int(cached.get("requested_retmax", len(cached_pmids)) or len(cached_pmids)),
+        )
+        if len(cached_pmids) < candidate_fetch_k and cached_requested_retmax < candidate_fetch_k:
+            pmids = _normalize_pmids(pubmed_esearch(effective_pubmed_query, retmax=candidate_fetch_k))
+            records = pubmed_efetch(pmids) if pmids else []
+            documents = to_documents(records)
+            remember_query_result(
+                query,
+                pubmed_query=effective_pubmed_query,
+                pmids=pmids,
+                requested_retmax=candidate_fetch_k,
+                store=cache_store,
+            )
+            cache_status = "hit_refreshed"
+        else:
+            pmids = cached_pmids[:candidate_fetch_k]
+            records = pubmed_efetch(pmids) if pmids else []
+            documents = to_documents(records)
+            cache_status = "hit"
     else:
         effective_pubmed_query = pubmed_query or query
-        pmids = pubmed_esearch(effective_pubmed_query, retmax=safe_top_n)
+        pmids = _normalize_pmids(pubmed_esearch(effective_pubmed_query, retmax=candidate_fetch_k))
         records = pubmed_efetch(pmids)
         documents = to_documents(records)
         remember_query_result(
             query,
             pubmed_query=effective_pubmed_query,
             pmids=pmids,
+            requested_retmax=candidate_fetch_k,
             store=cache_store,
         )
         cache_status = "miss"
@@ -167,9 +198,13 @@ def pubmed_search_tool(
     )
     if log_pipeline:
         LOGGER.info(
-            "[AGENT] PubMed search | cache=%s pmids=%s records=%s embedded=%s",
+            "[AGENT] PubMed search | requested_top_n=%s context_top_k=%s candidate_fetch_k=%s cache=%s pmids=%s unique_record_pmids=%s records=%s embedded=%s",
+            requested_top_n,
+            context_top_k,
+            candidate_fetch_k,
             cache_status,
             len(pmids),
+            _count_unique_record_pmids(records),
             len(records),
             embedded_count,
         )
@@ -180,9 +215,11 @@ def pubmed_search_tool(
         "pmids": pmids,
         "records": records,
         "documents": documents,
-        "docs_preview": _build_docs_preview(records, top_n=safe_top_n),
+        "docs_preview": _build_docs_preview(records, top_n=requested_top_n),
         "abstract_store": abstract_store,
         "embedded_count": embedded_count,
+        "context_top_k": context_top_k,
+        "candidate_fetch_k": candidate_fetch_k,
     }
 
 
@@ -194,8 +231,9 @@ def retriever_tool(
     use_reranker: bool,
     log_pipeline: bool = False,
 ) -> dict[str, Any]:
-    safe_top_n = _sanitize_top_n(top_n)
-    retriever = abstract_store.as_retriever(search_kwargs={"k": safe_top_n})
+    requested_top_n = _sanitize_top_n(top_n)
+    candidate_k = min(50, max(requested_top_n, (requested_top_n * 3) if use_reranker else requested_top_n))
+    retriever = abstract_store.as_retriever(search_kwargs={"k": candidate_k})
     reranker_active = False
     if use_reranker:
         try:
@@ -217,12 +255,15 @@ def retriever_tool(
         docs = []
 
     docs_list = list(docs or []) if not isinstance(docs, list) else docs
+    docs_list = _dedupe_docs_by_pmid(docs_list, limit=requested_top_n)
     if log_pipeline:
         LOGGER.info(
-            "[AGENT] Retriever | k=%s reranker_active=%s docs=%s",
-            safe_top_n,
+            "[AGENT] Retriever | candidate_k=%s requested_top_n=%s reranker_active=%s docs=%s unique_pmids=%s",
+            candidate_k,
+            requested_top_n,
             reranker_active,
             len(docs_list),
+            _count_unique_doc_pmids(docs_list),
         )
     return {
         "retriever": retriever,
@@ -236,8 +277,10 @@ def answer_synthesis_tool(
     query: str,
     retrieval_query: str,
     session_id: str,
+    branch_id: str = "main",
     llm: Any | None,
     retriever: Any,
+    context_top_k: int = 8,
 ) -> dict[str, Any]:
     if llm is None:
         return {
@@ -245,11 +288,11 @@ def answer_synthesis_tool(
             "raw": None,
         }
 
-    base_chain = build_rag_chain(llm, retriever)
+    base_chain = build_rag_chain(llm, retriever, max_abstracts=max(1, int(context_top_k)))
     chat_chain = build_chat_chain(base_chain)
     raw = chat_chain.invoke(
         {"input": query, "retrieval_query": retrieval_query},
-        config={"configurable": {"session_id": session_id}},
+        config={"configurable": {"session_id": session_id, "branch_id": branch_id}},
     )
     log_llm_usage("agent.answer.invoke", raw)
     return {"answer": _extract_message_text(raw), "raw": raw}
@@ -260,22 +303,24 @@ def answer_synthesis_stream_tool(
     query: str,
     retrieval_query: str,
     session_id: str,
+    branch_id: str = "main",
     llm: Any | None,
     retriever: Any,
+    context_top_k: int = 8,
 ) -> Generator[str, None, dict[str, Any]]:
     if llm is None:
         fallback = "LLM not configured. Set NVIDIA_API_KEY to enable contextual answers."
         yield fallback
         return {"answer": fallback, "raw": None}
 
-    base_chain = build_rag_chain(llm, retriever)
+    base_chain = build_rag_chain(llm, retriever, max_abstracts=max(1, int(context_top_k)))
     chat_chain = build_chat_chain(base_chain)
     usage_candidate: Any | None = None
     answer_text = ""
 
     for chunk in chat_chain.stream(
         {"input": query, "retrieval_query": retrieval_query},
-        config={"configurable": {"session_id": session_id}},
+        config={"configurable": {"session_id": session_id, "branch_id": branch_id}},
     ):
         if _has_usage_metadata(chunk):
             usage_candidate = chunk
@@ -308,6 +353,7 @@ def citation_formatting_tool(docs: list[Any], *, top_n: int) -> list[SourceItem]
                 "doi": str(meta.get("doi", "") or ""),
                 "pmcid": str(meta.get("pmcid", "") or ""),
                 "fulltext_url": str(meta.get("fulltext_url", "") or ""),
+                "context": _extract_doc_context(doc),
             }
         )
         seen_pmids.add(pmid)
@@ -386,6 +432,57 @@ def _sanitize_top_n(top_n: int) -> int:
     return max(1, min(10, parsed))
 
 
+def _resolve_context_top_k(config: Any, requested_top_n: int) -> int:
+    raw_value = getattr(config, "max_context_abstracts", getattr(config, "max_abstracts", requested_top_n))
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = requested_top_n
+    return max(1, min(requested_top_n, parsed))
+
+
+def _normalize_pmids(pmids: list[str] | tuple[str, ...] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in pmids or []:
+        pmid = str(raw).strip()
+        if not pmid or pmid in seen:
+            continue
+        seen.add(pmid)
+        normalized.append(pmid)
+    return normalized
+
+
+def _dedupe_docs_by_pmid(docs: list[Any], *, limit: int) -> list[Any]:
+    unique_docs: list[Any] = []
+    seen_pmids: set[str] = set()
+    for doc in docs or []:
+        metadata = getattr(doc, "metadata", {}) or {}
+        pmid = str(metadata.get("pmid", "") or "").strip()
+        if pmid and pmid in seen_pmids:
+            continue
+        if pmid:
+            seen_pmids.add(pmid)
+        unique_docs.append(doc)
+        if len(unique_docs) >= max(1, int(limit)):
+            break
+    return unique_docs
+
+
+def _count_unique_record_pmids(records: list[dict[str, Any]]) -> int:
+    return len({str((record or {}).get("pmid", "") or "").strip() for record in records or [] if str((record or {}).get("pmid", "") or "").strip()})
+
+
+def _count_unique_doc_pmids(docs: list[Any]) -> int:
+    return len(
+        {
+            str((getattr(doc, "metadata", {}) or {}).get("pmid", "") or "").strip()
+            for doc in docs or []
+            if str((getattr(doc, "metadata", {}) or {}).get("pmid", "") or "").strip()
+        }
+    )
+
+
 def _build_docs_preview(records: list[dict[str, Any]], *, top_n: int) -> list[SourceItem]:
     preview: list[SourceItem] = []
     seen: set[str] = set()
@@ -416,3 +513,15 @@ def _is_personal_medical_advice_request(query: str) -> bool:
         if re.search(pattern, normalized):
             return True
     return False
+
+
+def _extract_doc_context(doc: Any, limit: int = 1800) -> str:
+    text = str(getattr(doc, "page_content", "") or "").strip()
+    if not text:
+        return ""
+    parts = [part.strip() for part in text.split("\n\n") if part.strip()]
+    if len(parts) >= 2:
+        text = "\n\n".join(parts[1:])
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."

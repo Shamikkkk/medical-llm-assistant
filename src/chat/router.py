@@ -12,12 +12,14 @@ def invoke_chat_request(
     *,
     query: str,
     session_id: str,
+    branch_id: str = "main",
     top_n: int,
     agent_mode: bool,
     follow_up_mode: bool,
     chat_messages: list[dict[str, Any]],
     show_papers: bool = True,
     conversation_summary: str = "",
+    compute_device: str | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     request_id = uuid4().hex
@@ -33,6 +35,7 @@ def invoke_chat_request(
         "request.start",
         request_id=request_id,
         session_id=session_id,
+        branch_id=branch_id,
         query_hash=hash_query_text(query),
         effective_query_hash=hash_query_text(effective_query),
         agent_mode=agent_mode,
@@ -41,16 +44,19 @@ def invoke_chat_request(
     payload = invoke_chat_with_mode(
         effective_query,
         session_id=session_id,
+        branch_id=branch_id,
         top_n=top_n,
         agent_mode=agent_mode,
         request_id=request_id,
         include_paper_links=show_papers,
+        compute_device=compute_device,
     )
     payload = _drop_legacy_fields(payload)
     payload.setdefault("query", query)
     payload["effective_query"] = effective_query
     payload["rewritten_query"] = effective_query if rewritten else ""
     payload["last_topic_summary"] = topic_summary
+    payload["branch_id"] = branch_id
     payload.setdefault("request_id", request_id)
     return payload
 
@@ -59,12 +65,14 @@ def stream_chat_request(
     *,
     query: str,
     session_id: str,
+    branch_id: str = "main",
     top_n: int,
     agent_mode: bool,
     follow_up_mode: bool,
     chat_messages: list[dict[str, Any]],
     show_papers: bool = True,
     conversation_summary: str = "",
+    compute_device: str | None = None,
     **_: Any,
 ) -> Generator[str, None, dict[str, Any]]:
     request_id = uuid4().hex
@@ -80,6 +88,7 @@ def stream_chat_request(
         "request.start",
         request_id=request_id,
         session_id=session_id,
+        branch_id=branch_id,
         query_hash=hash_query_text(query),
         effective_query_hash=hash_query_text(effective_query),
         agent_mode=agent_mode,
@@ -89,10 +98,12 @@ def stream_chat_request(
     stream = stream_chat_with_mode(
         effective_query,
         session_id=session_id,
+        branch_id=branch_id,
         top_n=top_n,
         agent_mode=agent_mode,
         request_id=request_id,
         include_paper_links=show_papers,
+        compute_device=compute_device,
     )
     payload = yield from _yield_stream(stream)
     payload = _drop_legacy_fields(payload)
@@ -100,6 +111,7 @@ def stream_chat_request(
     payload["effective_query"] = effective_query
     payload["rewritten_query"] = effective_query if rewritten else ""
     payload["last_topic_summary"] = topic_summary
+    payload["branch_id"] = branch_id
     payload.setdefault("request_id", request_id)
     return payload
 
