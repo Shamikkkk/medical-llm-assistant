@@ -28,7 +28,6 @@ from src.integrations.pubmed import (
     build_multi_strategy_queries,
     multi_strategy_esearch,
     pubmed_efetch,
-    pubmed_esearch,
     rewrite_to_pubmed_query,
     to_documents,
 )
