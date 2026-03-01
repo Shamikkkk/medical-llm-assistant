@@ -1,0 +1,22 @@
+<!-- Created by Codex - Section 2 -->
+
+<div class="branch-tree">
+  @for (branch of branchNodes; track branch.branch_id) {
+    <button
+      type="button"
+      class="branch-node"
+      [class.active]="branch.branch_id === activeBranchId"
+      [style.--depth]="branch.depth"
+      (click)="branchSelected.emit(branch.branch_id)"
+    >
+      <span class="rail"></span>
+      <span class="dot"></span>
+      <span class="details">
+        <strong>{{ branch.title }}</strong>
+        <small>
+          {{ branch.branch_id === 'main' ? 'Main thread' : 'Forked at message ' + ((branch.parent_turn_index ?? 0) + 1) }}
+        </small>
+      </span>
+    </button>
+  }
+</div>

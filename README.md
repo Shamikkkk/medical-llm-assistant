@@ -1,180 +1,139 @@
-# Cardiovascular PubMed Assistant (Conversational)
+<!-- Created by Codex - Section 2 -->
 
-This is a simple web app that helps you search **PubMed** using normal English questions and then gives you a concise, evidence-based response grounded in real PubMed abstracts.
+# PubMed Literature Assistant
 
-**Important:** This assistant is **specialized in cardiovascular (heart and blood vessel) topics only**.  
-If you ask about unrelated medical areas, it will politely refuse.
+FastAPI + Angular application for biomedical literature Q&A grounded in PubMed abstracts.
 
----
+## Local Run
 
-## What this app does
+### Backend
 
-1. You type a cardiovascular research question (example: “Do SGLT2 inhibitors reduce heart failure hospitalization?”).
-2. The app converts your question into a PubMed-friendly search query.
-3. It pulls the most relevant PubMed abstracts.
-4. It summarizes what the abstracts collectively suggest and shows the sources (PMIDs).
-5. If you ask the same or a very similar question again, it can respond faster using its query cache.
-
----
-
-## Who is it for?
-
-- Medical students learning evidence-based medicine
-- Clinicians doing quick literature checks
-- Biomedical researchers doing hypothesis exploration or rapid review
-
----
-
-## How to run it (step-by-step)
-
-### 1) Install Python
-Make sure you have **Python 3.10+** installed.
-
-### 2) Download this project
-Place the project folder on your computer (for example, on Desktop).
-
-### 3) Create a virtual environment (recommended)
-Open a terminal in the project folder and run:
-
-```bash
-python -m venv .venv
-```
-
-Activate it:
-
-```bash
-# Windows (PowerShell)
-.venv\Scripts\Activate.ps1
-
-# macOS/Linux
-source .venv/bin/activate
-```
-
-### 4) Install dependencies
+1. Create and activate a virtual environment.
+2. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-This includes the in-app theme toggle component:
-- `streamlit-component-theme-changer`
-
-### 5) Set environment variables
-Copy the example env file and update it as needed:
+3. Create `.env` from the example file and set `NVIDIA_API_KEY` if you want answer generation enabled.
+4. Start the API:
 
 ```bash
-cp .env.example .env
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-At minimum, set:
-- `NVIDIA_API_KEY` (required for LLM-driven query rewriting and RAG answers)
+### Frontend
 
-Optional:
-- `NVIDIA_MODEL` (defaults to `meta/llama-3.1-8b-instruct`)
-- `USE_RERANKER=true` (if you have Flashrank installed)
-
-### 6) Run the app
+1. Install frontend dependencies:
 
 ```bash
-streamlit run app.py
+cd frontend
+npm ci
 ```
 
----
-
-## Notes
-
-- The app uses PubMed E-utilities and retrieves abstracts in real time.
-- Answers are grounded only in retrieved abstracts and include PMID citations.
-- If the NVIDIA key is missing, the app still retrieves papers but skips LLM-based answering.
-- In `AGENT_MODE=true`, the app runs a LangGraph-backed tool orchestrator.
-- In `EVAL_MODE=true`, the app runs online RAG evaluation sampling and stores results locally.
-
-### Paper-focused follow-up mode
-
-- Turn on **Follow-up mode** in the chat panel to rewrite short follow-up questions with conversation context.
-- Use **Suggested Papers** -> **Focus this paper** to activate paper-focused retrieval (click again to deselect).
-- When paper focus is active, answers are grounded in that paper index first.
-- Suggested papers include PMID, DOI (when available), PubMed link, and a resolved full-text landing URL.
-- Full-text ingestion priority is:
-  - PMC full text (when PMCID is accessible),
-  - Open-access HTML link extraction,
-  - User-uploaded PDF.
-- If full text is unavailable/paywalled, the app explicitly states that it is answering from abstract/metadata only and suggests alternatives.
-- You can ingest by either:
-  - uploading a PDF, or
-  - providing an accessible URL via **Fetch & Ingest from link**.
-- Paywall-safe behavior: the app does not bypass paywalls or login barriers.
-
----
-
-## Project structure
-
-- `app.py`: Streamlit entry point
-- `src/core/`: baseline RAG pipeline and chain logic
-- `src/agent/`: agent orchestrator and tool wrappers
-- `src/chat/`: follow-up contextualization and routing
-- `src/papers/`: paper fetch/cache/index helpers
-- `src/integrations/`: PubMed, Chroma, NVIDIA integrations
-- `src/ui/`: rendering/formatting helpers
-- `eval/`: evaluation runner, metrics, store, and dashboard helpers
-- `data/`: local persistence (Chroma vector stores)
-
----
-
-## Agent mode (optional)
-
-Enable in `.env`:
+2. Start the Angular development server:
 
 ```bash
-AGENT_MODE=true
-AGENT_USE_LANGGRAPH=true
+npm start
 ```
 
-Behavior:
-- `AGENT_MODE=false` (default): existing baseline pipeline runs unchanged.
-- `AGENT_MODE=true`: an agent orchestrator routes tool calls for guardrails, query refinement, PubMed retrieval, retrieval, answer synthesis, and citation formatting.
+The Angular dev server runs on `http://localhost:4200` and proxies `/api` to `http://localhost:8000`.
 
----
+## Tests
 
-## Evaluation mode (optional)
-
-Enable in `.env`:
+Backend:
 
 ```bash
-EVAL_MODE=true
-EVAL_SAMPLE_RATE=0.25
-EVAL_STORE_PATH=./data/eval/eval_results.jsonl
-OPENAI_API_KEY=<NVIDIA_API_KEY_FOR_OPENAI_COMPAT>
-OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
-# optional:
-RAGAS_JUDGE_MODEL=meta/llama-3.1-8b-instruct
-UNPAYWALL_EMAIL=<your_email_for_oa_lookup>
-HF_TOKEN=<optional_huggingface_token>
+pytest -q
 ```
 
-Behavior:
-- Runs online evaluation on sampled user turns.
-- Shows an **Evaluation Dashboard** tab in Streamlit.
-- Persists per-query metrics to JSONL.
-- RAGAS judge uses NVIDIA's OpenAI-compatible endpoint, so no OpenAI key is required.
-- If `OPENAI_API_KEY`/`OPENAI_BASE_URL` are missing or RAGAS errors, evaluation falls back to heuristic metrics.
-
-### Offline evaluation
-
-Use the template dataset:
+Frontend:
 
 ```bash
-python -m eval.run_offline --dataset data/eval_set.json --out data/eval/eval_results.jsonl
+cd frontend
+npm test -- --watch=false --browsers=ChromeHeadless
 ```
 
-Run in agent mode:
+Network smoke tests are opt-in:
 
 ```bash
-python -m eval.run_offline --dataset data/eval_set.json --out data/eval/eval_results.jsonl --agent-mode
+$env:RUN_NETWORK_TESTS="true"
+pytest -q tests/test_retrieval_smoke.py
 ```
 
-### Smoke test
+## Core Features
+
+- PubMed-grounded retrieval and answer generation with NVIDIA-hosted chat models.
+- FastAPI invoke + SSE streaming endpoints for chat, session history, branching, paper fetch, and config introspection.
+- Angular 17 single-page app with light/dark theme toggle, persisted client controls, and Claude-style branch navigation.
+- Similar-query answer cache, PubMed query caching, and Chroma-backed abstract storage.
+- Optional evaluation and metrics pipelines, plus branch/session persistence in `data/sessions.json`.
+
+## Key Configuration
+
+- `NVIDIA_API_KEY`: required for LLM answer generation.
+- `NVIDIA_MODEL`: generation model name.
+- `DATA_DIR`: root directory for Chroma persistence and local data.
+- `API_PORT`: backend listen port for local/dev deployments.
+- `FRONTEND_ORIGIN`: allowed browser origin for CORS.
+- `PUBMED_CACHE_TTL_SECONDS`
+- `PUBMED_NEGATIVE_CACHE_TTL_SECONDS`
+- `MAX_CONTEXT_ABSTRACTS`
+- `MAX_ABSTRACTS` (deprecated alias for `MAX_CONTEXT_ABSTRACTS`)
+- `MAX_CONTEXT_TOKENS`
+- `CONTEXT_TRIM_STRATEGY=truncate|compress`
+- `HYBRID_RETRIEVAL=true|false`
+- `HYBRID_ALPHA`
+- `CITATION_ALIGNMENT=true|false`
+- `ALIGNMENT_MODE=disclaim|remove`
+- `ANSWER_CACHE_TTL_SECONDS`
+- `ANSWER_CACHE_MIN_SIMILARITY`
+- `ANSWER_CACHE_STRICT_FINGERPRINT`
+- `EVAL_MODE`
+- `EVAL_SAMPLE_RATE`
+- `EVAL_STORE_PATH`
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
+- `RAGAS_JUDGE_MODEL`
+- `METRICS_MODE`
+- `METRICS_STORE_PATH`
+
+## Docker
+
+Build:
 
 ```bash
-python scripts/smoke_agent_eval.py
+docker build -t medical-llm-assistant:latest .
 ```
+
+Run:
+
+```bash
+docker run --rm -p 8000:8000 --env-file .env medical-llm-assistant:latest
+```
+
+The container healthcheck uses `GET /health`.
+
+## CI
+
+GitHub Actions workflow: `.github/workflows/ci.yml`
+
+It runs:
+
+- `ruff check . --select E9,F63,F7,F82,F401`
+- `pytest -q`
+- `cd frontend && npm ci`
+- `cd frontend && npm run build -- --configuration production`
+- `cd frontend && npm test -- --watch=false --browsers=ChromeHeadless`
+
+## Project Layout
+
+- `api/`: FastAPI entrypoint, routers, API models, and session persistence.
+- `frontend/`: Angular SPA, shared UI components, routing, and client-side state.
+- `src/core/`: baseline retrieval and generation pipeline.
+- `src/chat/`: follow-up handling and request routing.
+- `src/integrations/`: PubMed, Chroma, and NVIDIA integrations.
+- `src/papers/`: cached paper content and per-paper indexing helpers.
+- `src/observability/`: tracing and metrics helpers.
+- `eval/`: evaluation pipeline and dashboards.
+- `tests/`: backend unit and smoke tests.

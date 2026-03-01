@@ -1,0 +1,49 @@
+# VCS and CI
+.git
+.github
+
+# Python environments and caches
+.venv
+venv
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.tox/
+.coverage
+htmlcov/
+*.pyc
+*.pyo
+*.pyd
+
+# Local OS/editor noise
+.DS_Store
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Frontend/package caches
+node_modules
+**/node_modules
+frontend/node_modules
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Generated runtime data and local persistence
+data/
+**/chroma/
+**/*.sqlite*
+**/*.db
+**/*.parquet
+**/*.jsonl
+
+# Local tests and ad hoc files not needed at runtime
+tests/
+test.py

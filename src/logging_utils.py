@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
+import json
 import logging
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -15,16 +19,35 @@ def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(name)
 
 
-def log_llm_usage(tag: str, response: Any) -> None:
-    logger = get_logger("llm.usage")
+def log_event(
+    name: str,
+    *,
+    logger_name: str = "app.events",
+    store_path: str | Path | None = None,
+    **fields: Any,
+) -> dict[str, Any]:
+    payload = {
+        "event": name,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **_normalize_json_fields(fields),
+    }
+    get_logger(logger_name).info(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    if store_path:
+        path = Path(store_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    return payload
+
+
+def hash_query_text(text: str) -> str:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def extract_usage_stats(response: Any) -> dict[str, Any]:
     usage = _extract_usage_mapping(response)
-    model_name = _extract_model_name(response) or "unknown"
-    cost_fields = _extract_cost_fields(response)
-
-    if not usage:
-        logger.info("[TOKENS] %s usage metadata not available", tag)
-        return
-
+    model_name = _extract_model_name(response)
     prompt_tokens = _get_int(
         usage,
         [
@@ -46,21 +69,65 @@ def log_llm_usage(tag: str, response: Any) -> None:
     total_tokens = _get_int(usage, ["total_tokens", "total_token_count"])
     if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
         total_tokens = prompt_tokens + completion_tokens
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "model_name": model_name,
+    }
 
-    if prompt_tokens is None and completion_tokens is None and total_tokens is None:
+
+def log_llm_usage(tag: str, response: Any) -> dict[str, Any]:
+    logger = get_logger("llm.usage")
+    usage_stats = extract_usage_stats(response)
+    cost_fields = _extract_cost_fields(response)
+
+    if (
+        usage_stats["prompt_tokens"] is None
+        and usage_stats["completion_tokens"] is None
+        and usage_stats["total_tokens"] is None
+    ):
         logger.info("[TOKENS] %s usage metadata not available", tag)
-        return
+        return usage_stats
 
     line = (
         f"[TOKENS] {tag} "
-        f"prompt={_fmt_token(prompt_tokens)} "
-        f"completion={_fmt_token(completion_tokens)} "
-        f"total={_fmt_token(total_tokens)} "
-        f"model={model_name}"
+        f"prompt={_fmt_token(usage_stats['prompt_tokens'])} "
+        f"completion={_fmt_token(usage_stats['completion_tokens'])} "
+        f"total={_fmt_token(usage_stats['total_tokens'])} "
+        f"model={usage_stats.get('model_name') or 'unknown'}"
     )
     if cost_fields:
         line = f"{line} {cost_fields}"
     logger.info(line)
+    return usage_stats
+
+
+def _normalize_json_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in fields.items():
+        if isinstance(value, Path):
+            normalized[key] = str(value)
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            normalized[key] = value
+        elif isinstance(value, Mapping):
+            normalized[key] = _normalize_json_fields(dict(value))
+        elif isinstance(value, (list, tuple)):
+            normalized[key] = [
+                _normalize_json_fields(item) if isinstance(item, Mapping) else _coerce_json_scalar(item)
+                for item in value
+            ]
+        else:
+            normalized[key] = _coerce_json_scalar(value)
+    return normalized
+
+
+def _coerce_json_scalar(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def _extract_usage_mapping(response: Any) -> Mapping[str, Any] | None:
@@ -179,7 +246,9 @@ def _contains_token_keys(payload: Mapping[str, Any]) -> bool:
     return any(key in payload_keys for key in keys)
 
 
-def _get_int(payload: Mapping[str, Any], keys: list[str]) -> int | None:
+def _get_int(payload: Mapping[str, Any] | None, keys: list[str]) -> int | None:
+    if payload is None:
+        return None
     for key in keys:
         value = payload.get(key)
         if value is None:

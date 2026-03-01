@@ -1,0 +1,41 @@
+/* Created by Codex - Section 2 */
+
+.empty-state {
+  position: relative;
+  overflow: hidden;
+  padding: 2rem;
+  border-radius: 1.6rem;
+}
+
+.halo {
+  position: absolute;
+  inset: auto auto -3rem -3rem;
+  width: 12rem;
+  height: 12rem;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(0, 212, 180, 0.18), transparent 68%);
+}
+
+.content {
+  position: relative;
+}
+
+.mono {
+  margin: 0 0 0.6rem;
+  color: var(--accent);
+  font-size: 0.85rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h2 {
+  margin: 0;
+  font-size: clamp(1.7rem, 2vw, 2.4rem);
+}
+
+.message {
+  margin: 0.8rem 0 0;
+  max-width: 42rem;
+  color: var(--text-muted);
+  line-height: 1.7;
+}

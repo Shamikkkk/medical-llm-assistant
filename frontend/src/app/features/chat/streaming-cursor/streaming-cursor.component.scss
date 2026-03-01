@@ -1,0 +1,22 @@
+/* Created by Codex - Section 2 */
+
+.cursor {
+  display: inline-block;
+  width: 0.6rem;
+  height: 1.1rem;
+  margin-left: 0.3rem;
+  border-radius: 0.15rem;
+  background: var(--accent);
+  vertical-align: text-bottom;
+  animation: blink 0.7s ease-in-out infinite alternate;
+}
+
+@keyframes blink {
+  from {
+    opacity: 0.28;
+  }
+
+  to {
+    opacity: 1;
+  }
+}

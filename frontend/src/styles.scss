@@ -1,0 +1,104 @@
+/* Created by Codex - Section 2 */
+
+@import url("https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=JetBrains+Mono:wght@400;500;700&family=Lato:wght@300;400;700;900&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary: #f7f9fc;
+  --bg-panel: #eef1f6;
+  --bg-panel-strong: rgba(255, 255, 255, 0.82);
+  --bg-elevated: rgba(255, 255, 255, 0.68);
+  --text-primary: #0d1117;
+  --text-muted: #6b7280;
+  --accent: #00d4b4;
+  --accent-soft: rgba(0, 212, 180, 0.14);
+  --border: #dde3ed;
+  --shadow: 0 30px 80px rgba(24, 39, 75, 0.12);
+  --danger: #c85570;
+}
+
+.dark {
+  --bg-primary: #08101e;
+  --bg-panel: #0f1c2e;
+  --bg-panel-strong: rgba(15, 28, 46, 0.9);
+  --bg-elevated: rgba(15, 28, 46, 0.72);
+  --text-primary: #f0f4f8;
+  --text-muted: #8b9ab0;
+  --accent: #00d4b4;
+  --accent-soft: rgba(0, 212, 180, 0.12);
+  --border: #1e2d42;
+  --shadow: 0 40px 100px rgba(0, 0, 0, 0.42);
+  --danger: #ef7d96;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Lato", sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(0, 212, 180, 0.14), transparent 30%),
+    radial-gradient(circle at top right, rgba(41, 121, 255, 0.1), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(238, 241, 246, 0.98));
+  color: var(--text-primary);
+  transition:
+    background 180ms ease,
+    color 180ms ease;
+}
+
+.dark body {
+  background:
+    radial-gradient(circle at top left, rgba(0, 212, 180, 0.1), transparent 28%),
+    radial-gradient(circle at top right, rgba(62, 112, 255, 0.12), transparent 22%),
+    linear-gradient(180deg, #08101e 0%, #0d1627 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(107, 114, 128, 0.35);
+  border-radius: 999px;
+}
+
+.glass-panel {
+  background: var(--bg-panel-strong);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.mono {
+  font-family: "JetBrains Mono", monospace;
+}
+
+.display {
+  font-family: "DM Serif Display", serif;
+}

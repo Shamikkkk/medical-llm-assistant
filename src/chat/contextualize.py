@@ -11,40 +11,68 @@ FOLLOWUP_HINT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+REWRITE_PROMPT = """You are rewriting a follow-up question so it is fully self-contained for a PubMed literature search.
+
+Previous topic: {topic_summary}
+Conversation so far: {history}
+Follow-up question: {query}
+
+Rules:
+- Produce exactly one rewritten question
+- Include the medical condition, intervention, and outcome from prior context
+- Do NOT include phrases like "as discussed" or "as mentioned"
+- Maximum 25 words
+- Output ONLY the rewritten question, nothing else
+
+Rewritten question:"""
+
 
 def contextualize_question(
     *,
     user_query: str,
     chat_messages: list[dict[str, Any]],
     follow_up_mode: bool,
+    conversation_summary: str = "",
     llm: Any | None = None,
 ) -> tuple[str, str, bool]:
     """Return (effective_query, topic_summary, rewritten)."""
     query = str(user_query or "").strip()
     topic_summary = summarize_last_topic(chat_messages)
-    if not follow_up_mode or not query:
-        return query, topic_summary, False
-
-    if not _needs_contextualization(query):
-        return query, topic_summary, False
+    summary_hint = _merge_summary_hints(conversation_summary, topic_summary)
+    if not query:
+        return query, summary_hint, False
 
     history_excerpt = _history_excerpt(chat_messages)
     if not history_excerpt:
-        return query, topic_summary, False
+        return query, summary_hint, False
+
+    should_contextualize = bool(follow_up_mode or _needs_contextualization(query))
+    if not should_contextualize:
+        return query, summary_hint, False
 
     if llm is not None:
-        rewritten = _rewrite_with_llm(query=query, history=history_excerpt, llm=llm)
+        rewritten = _rewrite_with_llm(
+            query=query,
+            history=history_excerpt,
+            topic_summary=summary_hint,
+            llm=llm,
+        )
         if rewritten:
             LOGGER.info("[FOLLOWUP] rewritten_query='%s'", _trim(rewritten))
-            return rewritten, topic_summary, rewritten != query
+            return rewritten, summary_hint, rewritten != query
 
     # Heuristic fallback.
-    if topic_summary:
-        rewritten = f"{query} (context: {topic_summary})"
+    last_user_question = _last_user_question(chat_messages)
+    context_hint = summary_hint or last_user_question or history_excerpt[:180]
+    if context_hint:
+        rewritten = (
+            f"{query} in the context of: {context_hint}. "
+            "Respond specifically to this follow-up."
+        )[:320].strip()
     else:
-        rewritten = f"{query} (context: {history_excerpt[:180]})"
+        rewritten = query
     LOGGER.info("[FOLLOWUP] rewritten_query='%s' (heuristic)", _trim(rewritten))
-    return rewritten, topic_summary, rewritten != query
+    return rewritten, summary_hint, rewritten != query
 
 
 def summarize_last_topic(messages: list[dict[str, Any]], max_chars: int = 220) -> str:
@@ -87,13 +115,17 @@ def _history_excerpt(messages: list[dict[str, Any]], max_turns: int = 6, max_cha
     return text
 
 
-def _rewrite_with_llm(*, query: str, history: str, llm: Any) -> str | None:
-    prompt = (
-        "Rewrite the follow-up user question into a standalone research query while preserving intent.\n"
-        "Use conversation history only to resolve references.\n"
-        "Return ONLY the rewritten question.\n"
-        f"History:\n{history}\n\n"
-        f"User question:\n{query}\n"
+def _rewrite_with_llm(
+    *,
+    query: str,
+    history: str,
+    topic_summary: str,
+    llm: Any,
+) -> str | None:
+    prompt = REWRITE_PROMPT.format(
+        topic_summary=topic_summary,
+        history=history,
+        query=query,
     )
     try:
         if hasattr(llm, "invoke"):
@@ -112,7 +144,7 @@ def _rewrite_with_llm(*, query: str, history: str, llm: Any) -> str | None:
         cleaned = cleaned.splitlines()[0].strip()
     if not cleaned:
         return None
-    return cleaned[:320]
+    return " ".join(cleaned.split()[:25]).strip()
 
 
 def _extract_text(payload: Any) -> str:
@@ -139,3 +171,25 @@ def _trim(text: str, limit: int = 140) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit].rstrip() + "..."
+
+
+def _last_user_question(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages or []):
+        if str(message.get("role", "")) != "user":
+            continue
+        text = str(message.get("content", "") or "").strip()
+        if text:
+            return text[:220]
+    return ""
+
+
+def _merge_summary_hints(conversation_summary: str, topic_summary: str, max_chars: int = 260) -> str:
+    rows = []
+    primary = " ".join(str(conversation_summary or "").split()).strip()
+    secondary = " ".join(str(topic_summary or "").split()).strip()
+    if primary:
+        rows.append(primary)
+    if secondary and secondary not in rows:
+        rows.append(secondary)
+    merged = " | ".join(rows).strip()
+    return merged[:max_chars]

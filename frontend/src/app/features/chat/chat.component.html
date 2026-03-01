@@ -1,0 +1,67 @@
+<!-- Created by Codex - Section 2 -->
+
+<section class="chat-page glass-panel">
+  <header class="chat-header">
+    <div>
+      <p class="mono">Active branch</p>
+      <h2 class="display">
+        {{ sessionService.activeBranch()?.title || 'Main' }}
+      </h2>
+      <p class="context">
+        {{ sessionService.activeSession()?.title || 'New conversation' }}
+      </p>
+    </div>
+  </header>
+
+  <div class="transcript">
+    @if (!messages().length) {
+      <app-empty-state />
+    } @else {
+      @for (message of messages(); track $index) {
+        @if (message.role === 'assistant' && message.streaming && waitingForFirstChunk() && !message.content) {
+          <app-loading-indicator [query]="loadingQuery($index)" />
+        } @else {
+          <app-message-bubble
+            [message]="message"
+            [messageIndex]="$index"
+            [dimmed]="isDimmed($index)"
+            [showEdit]="message.role === 'user' && !isStreaming()"
+            [showSources]="sessionService.showPapers()"
+            [showStreamingCursor]="!!message.streaming && isStreaming()"
+            (editRequested)="startEditing($event)"
+          />
+        }
+
+        @if (editingMessageIndex() === $index && message.role === 'user') {
+          <app-branch-composer
+            [query]="message.content"
+            [busy]="branchBusy()"
+            (cancel)="cancelEdit()"
+            (createBranch)="createBranch($event)"
+          />
+        }
+      }
+    }
+
+    <div #scrollAnchor></div>
+  </div>
+
+  <form class="composer" (ngSubmit)="submitQuery()">
+    <textarea
+      [ngModel]="draftQuery()"
+      (ngModelChange)="draftQuery.set($event)"
+      name="query"
+      rows="3"
+      placeholder="Ask about a condition, compare interventions, or continue the literature thread..."
+    ></textarea>
+    <div class="composer-actions">
+      <p>
+        Streaming {{ sessionService.topN() }} papers ·
+        {{ sessionService.followUpMode() ? 'follow-up mode on' : 'follow-up mode off' }}
+      </p>
+      <button type="submit" [disabled]="isStreaming() || !draftQuery().trim()">
+        {{ isStreaming() ? 'Working...' : 'Send' }}
+      </button>
+    </div>
+  </form>
+</section>

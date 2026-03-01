@@ -6,100 +6,160 @@ import json
 import re
 
 from src.history import get_session_history
+from src.intent import is_forced_medical_query, normalize_user_query
 
 REFUSAL_MESSAGE = (
-    "I'm focused on cardiovascular topics (heart and blood vessel conditions). "
-    "Please rephrase your question to a cardiovascular topic."
+    "I focus on biomedical and health literature questions. "
+    "Please ask a medical, clinical, or public-health question."
 )
 
-CARDIO_PHRASES: tuple[str, ...] = (
-    "cardiovascular",
+BIOMEDICAL_PHRASES: tuple[str, ...] = (
+    "clinical trial",
+    "randomized trial",
+    "systematic review",
+    "meta analysis",
+    "meta-analysis",
+    "public health",
+    "case control",
+    "cohort study",
+    "adverse event",
+    "side effect",
+    "quality of life",
+    "disease progression",
+    "overall survival",
+    "progression free survival",
     "heart failure",
-    "congestive heart failure",
-    "myocardial infarction",
     "atrial fibrillation",
-    "cardiac arrest",
-    "coronary artery",
-    "blood pressure",
-    "heart valve",
-    "aortic valve",
-    "mitral valve",
-    "tricuspid valve",
-    "pulmonary valve",
-    "peripheral artery disease",
-    "hfpef",
-    "hfref",
-)
-
-CARDIO_WORDS: tuple[str, ...] = (
-    "heart",
-    "cardiac",
-    "cardiology",
-    "coronary",
-    "atrial",
-    "ventricular",
-    "hypertension",
-    "hypotension",
-    "angina",
-    "arrhythmia",
-    "arrhythmias",
-    "cardiomyopathy",
-    "ischemia",
-    "ischemic",
-    "atherosclerosis",
-    "aneurysm",
-    "aorta",
-    "myocardial",
-    "pericarditis",
-    "endocarditis",
-    "myocarditis",
-    "stroke",
-    "cerebrovascular",
-    "stemi",
-    "nstemi",
-    "ecg",
-    "ekg",
-    "echocardiogram",
-    "statin",
-    "sglt2",
-    "antiplatelet",
-    "anticoagulant",
-)
-
-CARDIO_ABBREV_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bmi\b", flags=re.IGNORECASE),
-    re.compile(r"\bafib\b", flags=re.IGNORECASE),
-    re.compile(r"\ba[\-\s]?fib\b", flags=re.IGNORECASE),
-    re.compile(r"\bchf\b", flags=re.IGNORECASE),
-    re.compile(r"\bpad\b", flags=re.IGNORECASE),
-    re.compile(r"\bhfpef\b", flags=re.IGNORECASE),
-    re.compile(r"\bhfref\b", flags=re.IGNORECASE),
-)
-
-OVERLAP_PHRASES: tuple[str, ...] = (
-    "chronic obstructive pulmonary disease",
-    "pulmonary hypertension",
-    "pulmonary arterial hypertension",
-    "cor pulmonale",
-    "sleep apnea",
-    "obstructive sleep apnea",
+    "myocardial infarction",
     "pulmonary embolism",
+    "chronic kidney disease",
+    "type 2 diabetes",
+    "inflammatory bowel disease",
+    "low fodmap",
+    "glioblastoma",
+    "smoking cessation",
+    "quit smoking",
+    "stop smoking",
 )
 
-OVERLAP_WORDS: tuple[str, ...] = (
-    "copd",
-    "dyspnea",
-    "hypoxemia",
-    "hypercapnia",
-    "respiratory failure",
+BIOMEDICAL_WORDS: tuple[str, ...] = (
+    "medicine",
+    "medical",
+    "clinical",
+    "patient",
+    "patients",
+    "trial",
+    "therapy",
+    "treatment",
+    "drug",
+    "medication",
+    "dose",
+    "diagnosis",
+    "prognosis",
+    "mortality",
+    "morbidity",
+    "biomarker",
+    "pathophysiology",
+    "infection",
+    "vaccine",
+    "antibiotic",
+    "oncology",
+    "cancer",
+    "tumor",
+    "carcinoma",
+    "chemotherapy",
+    "radiotherapy",
+    "neurology",
+    "brain",
+    "stroke",
+    "seizure",
+    "epilepsy",
+    "dementia",
+    "parkinson",
+    "alzheimer",
+    "migraine",
+    "gastroenterology",
+    "gastrointestinal",
+    "gut",
+    "ibs",
+    "ibd",
+    "gerd",
+    "microbiome",
+    "ulcer",
+    "colitis",
+    "crohn",
+    "hepatitis",
+    "liver",
+    "renal",
+    "kidney",
+    "ckd",
+    "dialysis",
+    "nephrology",
     "pulmonary",
+    "respiratory",
+    "copd",
+    "asthma",
+    "pneumonia",
+    "cardio",
+    "cardiac",
+    "heart",
+    "hypertension",
+    "myocardial",
+    "arrhythmia",
+    "endocrine",
+    "diabetes",
+    "thyroid",
+    "cholesterol",
+    "lipid",
+    "blood pressure",
+    "smoking",
+    "smoke",
+    "smoker",
+    "tobacco",
+    "nicotine",
+    "vaping",
+    "vape",
+    "cigarette",
+    "cigarettes",
 )
 
-OVERLAP_ABBREV_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bcopd\b", flags=re.IGNORECASE),
-    re.compile(r"\bosa\b", flags=re.IGNORECASE),
-    re.compile(r"\bpah\b", flags=re.IGNORECASE),
+NON_BIOMEDICAL_WORDS: tuple[str, ...] = (
+    "stock",
+    "stocks",
+    "crypto",
+    "bitcoin",
+    "forex",
+    "finance",
+    "investment",
+    "javascript",
+    "python code",
+    "programming",
+    "debug my code",
+    "sports",
+    "nba",
+    "nfl",
+    "football",
+    "soccer",
+    "weather",
+    "travel",
+    "restaurant",
+    "recipe",
+    "movie",
+    "song",
+    "lyrics",
+    "politics",
+    "election",
 )
+
+SYSTEM_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "cardio": ("cardio", "cardiac", "heart", "myocardial", "arrhythmia", "hypertension"),
+    "pulmonary": ("pulmonary", "respiratory", "copd", "asthma", "pneumonia"),
+    "neuro": ("brain", "stroke", "seizure", "dementia", "parkinson", "neurology"),
+    "gi": ("gastro", "gut", "ibs", "ibd", "gerd", "liver", "hepatitis"),
+    "renal": ("renal", "kidney", "ckd", "dialysis", "nephrology"),
+    "endocrine": ("diabetes", "thyroid", "endocrine", "insulin"),
+    "oncology": ("cancer", "tumor", "carcinoma", "metastasis", "chemotherapy", "oncology"),
+}
 
 FOLLOWUP_PHRASES: tuple[str, ...] = (
     "tell me more",
@@ -113,7 +173,6 @@ FOLLOWUP_PHRASES: tuple[str, ...] = (
     "go deeper",
     "what is its",
     "what is their",
-    "what about dosage",
     "dosage",
     "dose",
     "safety",
@@ -124,6 +183,11 @@ FOLLOWUP_PHRASES: tuple[str, ...] = (
 
 PRONOUN_PATTERN = re.compile(
     r"\b(it|they|this|that|those|these|them|its|their|here|there)\b",
+    flags=re.IGNORECASE,
+)
+
+MEDICAL_SUFFIX_PATTERN = re.compile(
+    r"\b[a-z]{4,}(itis|osis|emia|opathy|plasty|ectomy|oma|algia|genic)\b",
     flags=re.IGNORECASE,
 )
 
@@ -187,7 +251,7 @@ class ScopeResult:
 
 
 def classify_scope(query: str, session_id: str, llm: Any | None = None) -> ScopeResult:
-    normalized = _normalize(query)
+    normalized = normalize_user_query(query)
     if not normalized:
         return ScopeResult(
             label="OUT_OF_SCOPE",
@@ -196,102 +260,90 @@ def classify_scope(query: str, session_id: str, llm: Any | None = None) -> Scope
             reason="empty_query",
         )
 
-    if _matches_cardio(normalized):
+    if is_forced_medical_query(query):
         return ScopeResult(
-            label="CARDIOVASCULAR",
+            label="BIOMEDICAL",
             allow=True,
             user_message="ok",
-            reason="cardio_heuristic",
+            reason="medical_override_smoking",
+        )
+
+    if _matches_biomedical(normalized):
+        label = "MULTI_SYSTEM_OVERLAP" if _matches_multisystem(normalized) else "BIOMEDICAL"
+        return ScopeResult(
+            label=label,
+            allow=True,
+            user_message="ok",
+            reason="biomedical_heuristic",
         )
 
     history_text = _get_history_context(session_id)
     ambiguous = _is_ambiguous_followup(normalized)
-
     if history_text and ambiguous:
         history_norm = _normalize(history_text)
-        history_cardio = _matches_cardio(history_norm)
-        history_overlap = _matches_overlap(history_norm)
-        if history_cardio:
-            return ScopeResult(
-                label="CARDIOVASCULAR",
-                allow=True,
-                user_message="ok",
-                reason="history_cardio",
-            )
-        if history_overlap:
-            return ScopeResult(
-                label="CARDIOPULMONARY_OVERLAP",
-                allow=True,
-                user_message="ok",
-                reason="history_overlap",
-            )
-        if _query_refers_to_history(normalized, history_norm):
-            label = "CARDIOPULMONARY_OVERLAP" if history_overlap else "CARDIOVASCULAR"
+        if _matches_biomedical(history_norm):
+            label = "MULTI_SYSTEM_OVERLAP" if _matches_multisystem(history_norm) else "BIOMEDICAL"
             return ScopeResult(
                 label=label,
+                allow=True,
+                user_message="ok",
+                reason="history_biomedical",
+            )
+        if _query_refers_to_history(normalized, history_norm):
+            return ScopeResult(
+                label="BIOMEDICAL",
                 allow=True,
                 user_message="ok",
                 reason="history_reference",
             )
 
-    if _matches_overlap(normalized):
-        needs_reframe = _needs_overlap_reframe(normalized)
-        reframed_query = None
-        user_message = "ok"
-        if needs_reframe:
-            reframed_query = _build_overlap_reframe_query(query, llm)
-            user_message = (
-                "This is primarily a pulmonary topic. I can answer from a cardiovascular "
-                "lens (e.g., effects on heart failure, pulmonary hypertension, arrhythmias, "
-                "or cardiovascular risk). I will proceed with that cardiopulmonary overlap view."
-            )
-        return ScopeResult(
-            label="CARDIOPULMONARY_OVERLAP",
-            allow=True,
-            user_message=user_message,
-            reframed_query=reframed_query,
-            reason="overlap_heuristic",
-        )
-
     if llm is not None:
         llm_result = _classify_with_llm_json(query, history_text, llm)
         if llm_result:
-            label = llm_result.get("label")
-            needs_reframe = llm_result.get("needs_reframe", False)
-            reframe = llm_result.get("reframe") or None
-            reason = llm_result.get("reason")
-            if label == "CARDIOVASCULAR":
-                return ScopeResult(
-                    label="CARDIOVASCULAR",
-                    allow=True,
-                    user_message="ok",
-                    reason=reason,
-                )
-            if label == "CARDIOPULMONARY_OVERLAP":
-                reframed_query = reframe if needs_reframe else None
-                if needs_reframe and not reframed_query:
-                    reframed_query = _build_overlap_reframe_query(query, llm)
+            label = str(llm_result.get("label", "") or "").strip().upper()
+            reason = str(llm_result.get("reason", "") or "").strip() or None
+            needs_reframe = bool(llm_result.get("needs_reframe", False))
+            reframe = str(llm_result.get("reframe", "") or "").strip()
+            if label in {"BIOMEDICAL", "MULTI_SYSTEM_OVERLAP"}:
+                reframed_query = None
                 user_message = "ok"
                 if needs_reframe:
+                    reframed_query = _sanitize_query(reframe, fallback=query)
                     user_message = (
-                        "This is primarily a pulmonary topic. I can answer from a cardiovascular "
-                        "lens (e.g., effects on heart failure, pulmonary hypertension, arrhythmias, "
-                        "or cardiovascular risk). I will proceed with that cardiopulmonary overlap view."
+                        "I interpreted this as a biomedical question and reframed the retrieval "
+                        "query for clearer evidence search."
                     )
                 return ScopeResult(
-                    label="CARDIOPULMONARY_OVERLAP",
+                    label=label,
                     allow=True,
                     user_message=user_message,
                     reframed_query=reframed_query,
-                    reason=reason,
+                    reason=reason or "llm_allow",
                 )
             if label == "OUT_OF_SCOPE":
                 return ScopeResult(
                     label="OUT_OF_SCOPE",
                     allow=False,
                     user_message=_build_refusal_message(query),
-                    reason=reason,
+                    reason=reason or "llm_out_of_scope",
                 )
+
+    if _looks_strongly_non_biomedical(normalized):
+        return ScopeResult(
+            label="OUT_OF_SCOPE",
+            allow=False,
+            user_message=_build_refusal_message(query),
+            reason="non_biomedical_heuristic",
+        )
+
+    if _looks_medical_morphology(normalized):
+        label = "MULTI_SYSTEM_OVERLAP" if _matches_multisystem(normalized) else "BIOMEDICAL"
+        return ScopeResult(
+            label=label,
+            allow=True,
+            user_message="ok",
+            reason="medical_morphology_fallback",
+        )
 
     return ScopeResult(
         label="OUT_OF_SCOPE",
@@ -302,20 +354,8 @@ def classify_scope(query: str, session_id: str, llm: Any | None = None) -> Scope
 
 
 def is_cardiovascular_query(query: str, llm: Any | None = None) -> tuple[bool, str]:
-    normalized = _normalize(query)
-    if not normalized:
-        return False, REFUSAL_MESSAGE
-
-    if _matches_cardio(normalized):
-        return True, "ok"
-
-    if llm is None:
-        return False, REFUSAL_MESSAGE
-
-    classification = _classify_with_llm(query, llm)
-    if classification == "CARDIOVASCULAR":
-        return True, "ok"
-    return False, REFUSAL_MESSAGE
+    result = classify_scope(query, session_id="default", llm=llm)
+    return result.allow, "ok" if result.allow else result.user_message
 
 
 def is_cardiovascular_query_with_history(
@@ -326,45 +366,53 @@ def is_cardiovascular_query_with_history(
 
 
 def _normalize(text: str) -> str:
-    return " ".join(text.lower().strip().split())
-
-
-def _matches_cardio(normalized_query: str) -> bool:
-    for phrase in CARDIO_PHRASES:
-        if phrase in normalized_query:
-            return True
-    for word in CARDIO_WORDS:
-        if _contains_word(normalized_query, word):
-            return True
-    for pattern in CARDIO_ABBREV_PATTERNS:
-        if pattern.search(normalized_query):
-            return True
-    return False
-
-
-def _matches_overlap(normalized_query: str) -> bool:
-    for phrase in OVERLAP_PHRASES:
-        if phrase in normalized_query:
-            return True
-    for word in OVERLAP_WORDS:
-        if _contains_word(normalized_query, word):
-            return True
-    for pattern in OVERLAP_ABBREV_PATTERNS:
-        if pattern.search(normalized_query):
-            return True
-    if _contains_word(normalized_query, "pulmonary") and _contains_word(
-        normalized_query, "hypertension"
-    ):
-        return True
-    if _contains_word(normalized_query, "pulmonary") and _contains_word(
-        normalized_query, "embolism"
-    ):
-        return True
-    return False
+    return " ".join(str(text or "").lower().strip().split())
 
 
 def _contains_word(text: str, word: str) -> bool:
     return re.search(rf"\b{re.escape(word)}\b", text) is not None
+
+
+def _matches_biomedical(normalized_query: str) -> bool:
+    for phrase in BIOMEDICAL_PHRASES:
+        if phrase in normalized_query:
+            return True
+    for word in BIOMEDICAL_WORDS:
+        if _contains_word(normalized_query, word):
+            return True
+    return _looks_medical_morphology(normalized_query)
+
+
+def _looks_medical_morphology(normalized_query: str) -> bool:
+    if MEDICAL_SUFFIX_PATTERN.search(normalized_query):
+        return True
+    # Common clinical phrasing patterns.
+    if "evidence for" in normalized_query:
+        return True
+    if "risk of" in normalized_query:
+        return True
+    if "survival" in normalized_query or "outcome" in normalized_query:
+        return True
+    return False
+
+
+def _matches_multisystem(normalized_query: str) -> bool:
+    matched_systems = 0
+    for terms in SYSTEM_KEYWORDS.values():
+        if any(_contains_word(normalized_query, term) for term in terms):
+            matched_systems += 1
+            if matched_systems >= 2:
+                return True
+    return False
+
+
+def _looks_strongly_non_biomedical(normalized_query: str) -> bool:
+    if _matches_biomedical(normalized_query):
+        return False
+    for term in NON_BIOMEDICAL_WORDS:
+        if _contains_word(normalized_query, term):
+            return True
+    return False
 
 
 def _is_ambiguous_followup(normalized_query: str) -> bool:
@@ -376,12 +424,6 @@ def _is_ambiguous_followup(normalized_query: str) -> bool:
     if PRONOUN_PATTERN.search(normalized_query):
         return True
     return False
-
-
-def _needs_overlap_reframe(normalized_query: str) -> bool:
-    if _matches_cardio(normalized_query):
-        return False
-    return True
 
 
 def _query_refers_to_history(normalized_query: str, history_text: str) -> bool:
@@ -431,11 +473,11 @@ def _get_history_context(session_id: str, max_messages: int = 6, max_chars: int 
 
 def _classify_with_llm(query: str, llm: Any) -> str | None:
     prompt = (
-        "You are a strict classifier for a cardiovascular PubMed assistant.\n"
-        "Classify the user query as exactly one of: CARDIOVASCULAR or "
-        "NON_CARDIOVASCULAR.\n"
+        "You are a strict classifier for a biomedical literature assistant.\n"
+        "Classify the user query as exactly one of: BIOMEDICAL or "
+        "NON_BIOMEDICAL.\n"
         "Return exactly two lines:\n"
-        "CLASSIFICATION: <CARDIOVASCULAR|NON_CARDIOVASCULAR>\n"
+        "CLASSIFICATION: <BIOMEDICAL|NON_BIOMEDICAL>\n"
         "RATIONALE: <short reason>\n"
         f"Query: {query}\n"
     )
@@ -451,14 +493,14 @@ def _classify_with_llm_json(
 ) -> dict[str, Any] | None:
     history_snippet = history_text or "(no prior history)"
     prompt = (
-        "You are a strict classifier for a cardiovascular PubMed assistant.\n"
-        "You handle cardiovascular and cardiopulmonary overlap topics ONLY from a "
-        "cardiovascular relevance perspective.\n"
-        "If the query is respiratory-only (e.g., 'What is COPD?'), choose "
-        "CARDIOPULMONARY_OVERLAP with needs_reframe=true.\n"
-        "If the query is cancer/skin/etc with no cardio angle, choose OUT_OF_SCOPE.\n"
-        "Return ONLY valid JSON with keys label, needs_reframe, reframe, reason.\n"
-        "Valid labels: CARDIOVASCULAR, CARDIOPULMONARY_OVERLAP, OUT_OF_SCOPE.\n"
+        "You are a strict classifier for a biomedical PubMed assistant.\n"
+        "Return ONLY valid JSON with keys: label, needs_reframe, reframe, reason.\n"
+        "Valid labels: BIOMEDICAL, MULTI_SYSTEM_OVERLAP, OUT_OF_SCOPE.\n"
+        "Rules:\n"
+        "- BIOMEDICAL: medical, clinical, translational, epidemiology, or public-health questions.\n"
+        "- MULTI_SYSTEM_OVERLAP: cross-specialty/multi-organ biomedical questions.\n"
+        "- OUT_OF_SCOPE: non-biomedical topics (finance, coding help, sports, entertainment).\n"
+        "- If query is a follow-up and history shows biomedical context, classify as BIOMEDICAL.\n"
         f"History: {history_snippet}\n"
         f"Query: {query}\n"
         "JSON:"
@@ -470,30 +512,11 @@ def _classify_with_llm_json(
     return _parse_scope_json(response_text)
 
 
-def _build_overlap_reframe_query(query: str, llm: Any | None = None) -> str:
-    fallback = (
-        f"{query} AND (cardiovascular OR heart OR cardiac OR heart failure OR "
-        "myocardial infarction OR arrhythmia OR stroke OR pulmonary hypertension)"
-    )
-    if llm is None:
-        return fallback
-
-    prompt = (
-        "Rewrite this pulmonology question into a PubMed-ready query focused on "
-        "cardiovascular relevance. Use boolean operators. Return only the query.\n"
-        f"Question: {query}\n"
-    )
-    rewritten = _invoke_llm(llm, prompt)
-    if not rewritten:
-        return fallback
-    return _sanitize_query(rewritten, fallback)
-
-
 def _build_refusal_message(query: str) -> str:
+    del query
     return (
-        "I'm specialized in cardiovascular and cardiopulmonary overlap topics. "
-        "If you'd like, ask how this topic affects cardiovascular outcomes, "
-        "heart function, arrhythmias, or vascular risk."
+        "I can help with biomedical and health literature questions. "
+        "Try reframing this as a medical, clinical, or public-health question."
     )
 
 
@@ -524,15 +547,15 @@ def _parse_classification(text: str) -> str | None:
     upper = text.upper()
     for line in upper.splitlines():
         if "CLASSIFICATION" in line:
-            if "NON_CARDIOVASCULAR" in line:
-                return "NON_CARDIOVASCULAR"
-            if "CARDIOVASCULAR" in line:
-                return "CARDIOVASCULAR"
+            if "NON_BIOMEDICAL" in line:
+                return "NON_BIOMEDICAL"
+            if "BIOMEDICAL" in line:
+                return "BIOMEDICAL"
 
-    if "NON_CARDIOVASCULAR" in upper:
-        return "NON_CARDIOVASCULAR"
-    if "CARDIOVASCULAR" in upper:
-        return "CARDIOVASCULAR"
+    if "NON_BIOMEDICAL" in upper:
+        return "NON_BIOMEDICAL"
+    if "BIOMEDICAL" in upper:
+        return "BIOMEDICAL"
     return None
 
 
@@ -540,14 +563,14 @@ def _parse_scope_json(text: str) -> dict[str, Any] | None:
     raw = text.strip()
     try:
         payload = json.loads(raw)
-        return payload
+        return payload if isinstance(payload, dict) else None
     except Exception:
         match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
         if not match:
             return None
         try:
             payload = json.loads(match.group(0))
-            return payload
+            return payload if isinstance(payload, dict) else None
         except Exception:
             return None
 

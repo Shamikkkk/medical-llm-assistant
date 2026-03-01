@@ -1,0 +1,139 @@
+/* Created by Codex - Section 2 */
+
+.message {
+  display: grid;
+  gap: 0.9rem;
+  max-width: min(70rem, 100%);
+  padding: 1.1rem 1.15rem;
+  border-radius: 1.35rem;
+  border: 1px solid var(--border);
+  background: var(--bg-panel-strong);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow);
+  animation: rise-in 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity 180ms ease;
+}
+
+.message.user {
+  justify-self: end;
+  background: linear-gradient(135deg, rgba(0, 212, 180, 0.18), rgba(0, 212, 180, 0.08));
+}
+
+.message.assistant {
+  justify-self: start;
+}
+
+.message.dimmed {
+  opacity: 0.45;
+}
+
+.message-header,
+.meta,
+.badges {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.meta {
+  justify-content: flex-start;
+}
+
+.role {
+  color: var(--accent);
+  font-size: 0.74rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.timestamp {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.badges {
+  justify-content: flex-end;
+}
+
+.badge,
+.edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.75rem;
+  padding: 0 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+}
+
+.badge {
+  background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+}
+
+.badge.quality.strong {
+  color: #0f9f67;
+}
+
+.badge.quality.moderate {
+  color: #0f6bd6;
+}
+
+.badge.quality.preliminary {
+  color: #c97b00;
+}
+
+.badge.quality.insufficient {
+  color: var(--text-muted);
+}
+
+.edit {
+  border: 0;
+  background: color-mix(in srgb, var(--bg-panel) 78%, transparent);
+  color: var(--text-muted);
+}
+
+.edit:hover {
+  color: var(--text-primary);
+}
+
+.body {
+  color: var(--text-primary);
+  line-height: 1.7;
+}
+
+.body p {
+  margin: 0;
+}
+
+.body :is(h1, h2, h3, h4) {
+  margin: 0 0 0.8rem;
+  font-family: "DM Serif Display", serif;
+}
+
+.body :is(ul, ol) {
+  margin: 0.75rem 0 0 1.2rem;
+  padding: 0;
+}
+
+.body :is(li, p) + :is(li, p) {
+  margin-top: 0.45rem;
+}
+
+.sources {
+  display: grid;
+  gap: 0.7rem;
+}
+
+@keyframes rise-in {
+  from {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}

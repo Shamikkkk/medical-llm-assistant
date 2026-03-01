@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from difflib import get_close_matches
 from functools import lru_cache
 import json
 import logging
@@ -16,6 +17,32 @@ MEDICAL_KEYWORDS: tuple[str, ...] = (
     "cardio",
     "cardiac",
     "heart",
+    "oncology",
+    "cancer",
+    "tumor",
+    "glioblastoma",
+    "chemotherapy",
+    "radiotherapy",
+    "neurology",
+    "brain",
+    "dementia",
+    "epilepsy",
+    "parkinson",
+    "gastro",
+    "gut",
+    "ibs",
+    "ibd",
+    "gerd",
+    "microbiome",
+    "fodmap",
+    "renal",
+    "kidney",
+    "ckd",
+    "endocrine",
+    "diabetes",
+    "thyroid",
+    "infection",
+    "antibiotic",
     "hypertension",
     "atrial",
     "coronary",
@@ -39,10 +66,78 @@ MEDICAL_KEYWORDS: tuple[str, ...] = (
     "mortality",
     "risk",
     "patient",
+    "smoking cessation",
+    "quit smoking",
+    "stop smoking",
+    "smoking",
+    "smoke",
+    "smoker",
+    "tobacco",
+    "nicotine",
+    "vaping",
+    "vape",
+    "cigarette",
+    "cigarettes",
+    "withdrawal",
 )
 
 _LLM_CACHE_MAX = 512
 _LLM_CACHE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+SMALLTALK_CONFIDENCE_THRESHOLD = 0.8
+_FUZZY_MEDICAL_TERMS: tuple[str, ...] = (
+    "quit",
+    "smoking",
+    "smoke",
+    "tobacco",
+    "nicotine",
+    "cessation",
+    "vaping",
+    "vape",
+    "cigarette",
+)
+_TOKEN_CORRECTIONS: dict[str, str] = {
+    "quti": "quit",
+    "quitt": "quit",
+    "smk": "smoke",
+    "smokng": "smoking",
+    "smokign": "smoking",
+    "smocking": "smoking",
+    "tabacco": "tobacco",
+    "cigerette": "cigarette",
+    "ciggarette": "cigarette",
+    "nictoine": "nicotine",
+    "vapng": "vaping",
+}
+_SMOKING_DOMAIN_TERMS = {
+    "smoking",
+    "smoke",
+    "smoker",
+    "smokers",
+    "tobacco",
+    "nicotine",
+    "vaping",
+    "vape",
+    "cigarette",
+    "cigarettes",
+}
+_SMOKING_ACTION_TERMS = {
+    "quit",
+    "quitting",
+    "stop",
+    "stopping",
+    "cessation",
+    "withdrawal",
+    "patch",
+    "gum",
+    "therapy",
+    "treatment",
+    "risk",
+    "risks",
+    "health",
+    "cancer",
+    "lung",
+    "lungs",
+}
 
 
 def classify_intent(user_text: str, llm: Any | None) -> IntentLabel:
@@ -51,13 +146,24 @@ def classify_intent(user_text: str, llm: Any | None) -> IntentLabel:
     return "smalltalk" if label == "smalltalk" else "medical"
 
 
+def normalize_user_query(user_text: str) -> str:
+    corrected_text = correct_common_medical_typos(user_text)
+    return _normalize(corrected_text)
+
+
 def classify_intent_details(
     user_text: str, llm: Any | None, *, log_enabled: bool = False
 ) -> dict[str, Any]:
-    normalized = _normalize(user_text)
+    normalized = normalize_user_query(user_text)
+    corrected_text = normalized
     if not normalized:
         result = {"label": "smalltalk", "confidence": 0.9, "reason": "empty_input"}
         _log_result(result, source="heuristic", cache_hit=False, enabled=log_enabled, query=normalized)
+        return result
+
+    if is_forced_medical_query(corrected_text):
+        result = {"label": "medical", "confidence": 0.98, "reason": "medical_override_smoking"}
+        _log_result(result, source="override", cache_hit=False, enabled=log_enabled, query=normalized)
         return result
 
     cached = _llm_cache_get(normalized)
@@ -66,7 +172,7 @@ def classify_intent_details(
         return dict(cached)
 
     if llm is not None:
-        llm_result = _classify_with_llm(user_text, llm)
+        llm_result = _classify_with_llm(corrected_text, llm)
         if llm_result is not None:
             _llm_cache_put(normalized, llm_result)
             _log_result(llm_result, source="llm", cache_hit=False, enabled=log_enabled, query=normalized)
@@ -88,19 +194,56 @@ def classify_intent_details(
 
 def smalltalk_reply(query: str, llm: Any | None = None) -> str:
     del llm  # deterministic smalltalk keeps this path cheap and robust
-    normalized = _normalize(query)
+    normalized = normalize_user_query(query)
     if "help" in normalized and "you" in normalized:
         return (
-            "I can help with cardiovascular and cardiopulmonary overlap literature questions. "
+            "I can help with medical and health literature questions across specialties. "
             "Ask a clinical question and I will search PubMed abstracts, summarize findings, "
             "and provide PMID-linked sources."
         )
     if "thank" in normalized:
-        return "You're welcome. Ask me any cardiovascular evidence question when you're ready."
+        return "You're welcome. Ask me any medical evidence question when you're ready."
     return (
-        "Hi. I can help with cardiovascular and cardiopulmonary overlap PubMed questions. "
-        "For example: 'DOACs vs warfarin for stroke prevention in atrial fibrillation.'"
+        "Hi. I can help with PubMed-backed medical questions. "
+        "For example: 'What is the evidence for temozolomide in glioblastoma?'"
     )
+
+
+def should_short_circuit_smalltalk(intent_details: dict[str, Any], user_text: str) -> bool:
+    label = str(intent_details.get("label", "") or "").strip().lower()
+    if label != "smalltalk":
+        return False
+    if is_forced_medical_query(user_text):
+        return False
+    return _coerce_confidence(intent_details.get("confidence", 0.0)) >= SMALLTALK_CONFIDENCE_THRESHOLD
+
+
+def correct_common_medical_typos(user_text: str) -> str:
+    raw_text = str(user_text or "")
+    if not raw_text.strip():
+        return ""
+    parts = re.findall(r"[A-Za-z']+|[^A-Za-z']+", raw_text)
+    corrected_parts: list[str] = []
+    for part in parts:
+        if not re.fullmatch(r"[A-Za-z']+", part):
+            corrected_parts.append(part)
+            continue
+        corrected_parts.append(_restore_case(part, _correct_token(part)))
+    return "".join(corrected_parts)
+
+
+def is_forced_medical_query(user_text: str) -> bool:
+    normalized = normalize_user_query(user_text)
+    if not normalized:
+        return False
+    tokens = set(normalized.split())
+    if "quit smoking" in normalized or "stop smoking" in normalized or "smoking cessation" in normalized:
+        return True
+    if tokens.intersection({"tobacco", "nicotine", "cigarette", "cigarettes", "vaping", "vape"}):
+        return True
+    if tokens.intersection(_SMOKING_DOMAIN_TERMS) and tokens.intersection(_SMOKING_ACTION_TERMS):
+        return True
+    return False
 
 
 def _classify_with_llm(user_text: str, llm: Any) -> dict[str, Any] | None:
@@ -139,10 +282,32 @@ def _heuristic_label(normalized_query: str) -> tuple[IntentLabel, float, str]:
 
 
 def _contains_medical_keyword(text: str) -> bool:
+    if is_forced_medical_query(text):
+        return True
     for keyword in MEDICAL_KEYWORDS:
         if re.search(rf"\b{re.escape(keyword)}\b", text):
             return True
     return False
+
+
+def _correct_token(token: str) -> str:
+    lowered = token.lower()
+    if lowered in _TOKEN_CORRECTIONS:
+        return _TOKEN_CORRECTIONS[lowered]
+    if len(lowered) < 4:
+        return lowered
+    matches = get_close_matches(lowered, _FUZZY_MEDICAL_TERMS, n=1, cutoff=0.84)
+    if matches:
+        return matches[0]
+    return lowered
+
+
+def _restore_case(original: str, corrected: str) -> str:
+    if original.isupper():
+        return corrected.upper()
+    if original[:1].isupper():
+        return corrected.capitalize()
+    return corrected
 
 
 def _invoke_llm(llm: Any, prompt: str) -> str | None:

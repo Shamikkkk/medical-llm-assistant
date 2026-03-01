@@ -1,0 +1,94 @@
+/* Created by Codex - Section 2 */
+
+:host {
+  display: block;
+  min-height: 0;
+}
+
+.chat-page {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 1rem;
+  min-height: calc(100vh - 12rem);
+  padding: 1.15rem;
+  border-radius: 1.6rem;
+}
+
+.chat-header h2 {
+  margin: 0.2rem 0 0;
+  font-size: clamp(1.7rem, 2vw, 2.4rem);
+}
+
+.mono {
+  margin: 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.context {
+  margin: 0.35rem 0 0;
+  color: var(--text-muted);
+}
+
+.transcript {
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 0.35rem;
+}
+
+.composer {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.8rem;
+  border-radius: 1.2rem;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-panel) 74%, transparent);
+}
+
+textarea {
+  width: 100%;
+  min-height: 7rem;
+  resize: vertical;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.composer-actions p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.composer-actions button {
+  min-height: 2.8rem;
+  padding: 0 1.1rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.composer-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 720px) {
+  .chat-page {
+    min-height: calc(100vh - 10rem);
+    padding: 0.9rem;
+  }
+}

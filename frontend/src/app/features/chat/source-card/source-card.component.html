@@ -1,0 +1,33 @@
+<!-- Created by Codex - Section 2 -->
+
+<article class="source-card glass-panel" (click)="toggleExpanded()">
+  <div class="header">
+    <span class="rank">{{ source.rank ?? '•' }}</span>
+    <div class="copy">
+      <strong>{{ source.title || 'Untitled source' }}</strong>
+      <small>{{ source.journal || 'Journal unavailable' }} · {{ source.year || 'n.d.' }}</small>
+    </div>
+  </div>
+
+  <div class="meta">
+    <span class="pmid mono">PMID {{ source.pmid || 'N/A' }}</span>
+    <div class="links">
+      @if (pubmedLink) {
+        <a [href]="pubmedLink" target="_blank" rel="noopener" (click)="$event.stopPropagation()">
+          <lucide-angular [img]="linkIcon" size="14" />
+          PubMed
+        </a>
+      }
+      @if (doiLink) {
+        <a [href]="doiLink" target="_blank" rel="noopener" (click)="$event.stopPropagation()">
+          <lucide-angular [img]="linkIcon" size="14" />
+          DOI
+        </a>
+      }
+    </div>
+  </div>
+
+  @if (expanded() && source.context) {
+    <p class="snippet">{{ source.context }}</p>
+  }
+</article>

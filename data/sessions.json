@@ -1,0 +1,21 @@
+{
+  "chats": {
+    "0ec9120856754a73afa8e9b311250cd6": {
+      "chat_id": "0ec9120856754a73afa8e9b311250cd6",
+      "title": "New chat",
+      "created_at": "2026-03-01T20:27:37.136787+00:00",
+      "updated_at": "2026-03-01T20:27:37.136787+00:00",
+      "branches": {
+        "main": {
+          "branch_id": "main",
+          "title": "Main",
+          "parent_branch_id": "",
+          "parent_turn_index": null,
+          "created_at": "2026-03-01T20:27:37.136787+00:00",
+          "updated_at": "2026-03-01T20:27:37.136787+00:00",
+          "messages": []
+        }
+      }
+    }
+  }
+}

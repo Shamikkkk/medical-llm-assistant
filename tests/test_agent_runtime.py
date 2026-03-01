@@ -17,7 +17,15 @@ class AgentRuntimeTests(TestCase):
                 agent_mode=False,
             )
         self.assertEqual(result, expected)
-        mocked_baseline.assert_called_once_with("test query", session_id="s1", top_n=5)
+        mocked_baseline.assert_called_once_with(
+            "test query",
+            session_id="s1",
+            branch_id="main",
+            top_n=5,
+            request_id=None,
+            include_paper_links=True,
+            compute_device=None,
+        )
 
     def test_agent_mode_uses_orchestrator(self) -> None:
         expected = {"status": "answered", "answer": "agent"}
@@ -29,4 +37,12 @@ class AgentRuntimeTests(TestCase):
                 agent_mode=True,
             )
         self.assertEqual(result, expected)
-        mocked_agent.assert_called_once_with("test query", session_id="s1", top_n=5)
+        mocked_agent.assert_called_once_with(
+            "test query",
+            session_id="s1",
+            branch_id="main",
+            top_n=5,
+            request_id=None,
+            include_paper_links=True,
+            compute_device=None,
+        )

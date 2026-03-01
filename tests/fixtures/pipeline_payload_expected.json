@@ -1,0 +1,57 @@
+{
+  "status": "answered",
+  "answer": "Answer with PMID 12345.",
+  "branch_id": "main",
+  "sources": [
+    {
+      "rank": 1,
+      "pmid": "12345",
+      "title": "Trial evidence",
+      "journal": "Test Journal",
+      "year": "2024",
+      "doi": "10.1000/12345",
+      "fulltext_url": "https://pubmed.ncbi.nlm.nih.gov/12345/",
+      "context": "Trial evidence abstract showing reduced stroke risk with therapy."
+    }
+  ],
+  "reranker_active": false,
+  "pubmed_query": "trial evidence",
+  "docs_preview": [
+    {
+      "rank": 1,
+      "pmid": "12345",
+      "title": "Trial evidence",
+      "journal": "Test Journal",
+      "year": "2024",
+      "doi": "10.1000/12345",
+      "fulltext_url": "https://pubmed.ncbi.nlm.nih.gov/12345/"
+    }
+  ],
+  "scope_label": "BIOMEDICAL",
+  "scope_message": "ok",
+  "reframed_query": "",
+  "reframe_note": "",
+  "query": "sample question",
+  "intent_label": "medical",
+  "intent_confidence": 0.93,
+  "retrieved_contexts": [
+    {
+      "pmid": "12345",
+      "title": "Trial evidence",
+      "journal": "Test Journal",
+      "year": "2024",
+      "context": "Trial evidence abstract showing reduced stroke risk with therapy."
+    }
+  ],
+  "cache_hit": false,
+  "cache_status": "miss",
+  "request_id": "req-123",
+  "source_count_note": "Only 1 unique papers were available for this query.",
+  "timings": {
+    "answer_cache_lookup_ms": 0.0,
+    "retrieval_ms": 12.5,
+    "llm_ms": 0.0,
+    "total_ms": 0.0
+  },
+  "validation_warning": "support review pending"
+}

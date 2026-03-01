@@ -1,0 +1,15 @@
+<!-- Created by Codex - Section 2 -->
+
+<button
+  type="button"
+  class="theme-toggle"
+  [@iconState]="themeService.isDark() ? 'dark' : 'light'"
+  (click)="themeService.toggle()"
+  [attr.aria-label]="themeService.isDark() ? 'Enable light mode' : 'Enable dark mode'"
+>
+  <lucide-angular
+    [img]="themeService.isDark() ? sunIcon : moonIcon"
+    size="18"
+    strokeWidth="2"
+  />
+</button>
