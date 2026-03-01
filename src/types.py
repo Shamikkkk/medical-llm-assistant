@@ -49,5 +49,7 @@ class PipelineResponse(TypedDict, total=False):
     answer_cache_query: str
     answer_cache_config_match: bool
     answer_cache_note: str
+    invalid_citations: list[str]
+    evidence_quality: str
     source_count_note: str
     timings: dict[str, float]

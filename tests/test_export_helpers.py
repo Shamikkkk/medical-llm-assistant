@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from unittest import TestCase
 
-from src.ui.formatters import export_branch_json, export_branch_markdown
+from src.utils.export import export_branch_json, export_branch_markdown
 
 
 class ExportHelperTests(TestCase):

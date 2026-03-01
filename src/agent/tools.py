@@ -6,6 +6,7 @@ import re
 
 from src.core.chains import build_chat_chain, build_rag_chain
 from src.core.config import load_config
+from src.core.retrieval import hybrid_rerank_documents, select_context_documents
 from src.core.intent import (
     classify_intent_details,
     normalize_user_query,
@@ -13,7 +14,10 @@ from src.core.intent import (
     smalltalk_reply,
 )
 from src.core.scope import ScopeResult, classify_scope
+from src.integrations.nvidia import get_nvidia_llm
 from src.integrations.pubmed import (
+    build_multi_strategy_queries,
+    multi_strategy_esearch,
     pubmed_efetch,
     pubmed_esearch,
     rewrite_to_pubmed_query,
@@ -39,6 +43,13 @@ _PERSONAL_ADVICE_PATTERNS = (
     r"\bprescribe\b",
     r"\bdosage for me\b",
 )
+
+
+def _get_llm_safe() -> Any | None:
+    try:
+        return get_nvidia_llm()
+    except Exception:
+        return None
 
 
 def safety_guardrail_tool(
@@ -131,11 +142,16 @@ def pubmed_search_tool(
     compute_device: str | None = None,
 ) -> dict[str, Any]:
     config = load_config()
+    query_llm = _get_llm_safe() if bool(getattr(config, "multi_strategy_retrieval", True)) else None
     requested_top_n = _sanitize_top_n(top_n)
     context_top_k = _resolve_context_top_k(config, requested_top_n)
-    candidate_fetch_k = requested_top_n
-    if bool(getattr(config, "use_reranker", False)) or bool(getattr(config, "hybrid_retrieval", False)):
-        candidate_fetch_k = max(candidate_fetch_k, min(50, requested_top_n * 3))
+    candidate_fetch_k = max(
+        requested_top_n,
+        min(
+            50,
+            requested_top_n * max(1, int(getattr(config, "retrieval_candidate_multiplier", 3) or 3)),
+        ),
+    )
     cache_store = get_query_cache_store(persist_dir, embeddings_device=compute_device)
     abstract_store = get_abstract_store(persist_dir, embeddings_device=compute_device)
 
@@ -159,7 +175,14 @@ def pubmed_search_tool(
             int(cached.get("requested_retmax", len(cached_pmids)) or len(cached_pmids)),
         )
         if len(cached_pmids) < candidate_fetch_k and cached_requested_retmax < candidate_fetch_k:
-            pmids = _normalize_pmids(pubmed_esearch(effective_pubmed_query, retmax=candidate_fetch_k))
+            queries = (
+                build_multi_strategy_queries(query or effective_pubmed_query, query_llm)
+                if bool(getattr(config, "multi_strategy_retrieval", True))
+                else [effective_pubmed_query or query]
+            )
+            pmids = _normalize_pmids(
+                multi_strategy_esearch(queries, retmax_each=max(requested_top_n, 12))
+            )
             records = pubmed_efetch(pmids) if pmids else []
             documents = to_documents(records)
             remember_query_result(
@@ -177,7 +200,14 @@ def pubmed_search_tool(
             cache_status = "hit"
     else:
         effective_pubmed_query = pubmed_query or query
-        pmids = _normalize_pmids(pubmed_esearch(effective_pubmed_query, retmax=candidate_fetch_k))
+        queries = (
+            build_multi_strategy_queries(query or effective_pubmed_query, query_llm)
+            if bool(getattr(config, "multi_strategy_retrieval", True))
+            else [effective_pubmed_query or query]
+        )
+        pmids = _normalize_pmids(
+            multi_strategy_esearch(queries, retmax_each=max(requested_top_n, 12))
+        )
         records = pubmed_efetch(pmids)
         documents = to_documents(records)
         remember_query_result(
@@ -231,8 +261,15 @@ def retriever_tool(
     use_reranker: bool,
     log_pipeline: bool = False,
 ) -> dict[str, Any]:
+    config = load_config()
     requested_top_n = _sanitize_top_n(top_n)
-    candidate_k = min(50, max(requested_top_n, (requested_top_n * 3) if use_reranker else requested_top_n))
+    candidate_k = min(
+        50,
+        max(
+            requested_top_n,
+            requested_top_n * max(1, int(getattr(config, "retrieval_candidate_multiplier", 3) or 3)),
+        ),
+    )
     retriever = abstract_store.as_retriever(search_kwargs={"k": candidate_k})
     reranker_active = False
     if use_reranker:
@@ -255,7 +292,15 @@ def retriever_tool(
         docs = []
 
     docs_list = list(docs or []) if not isinstance(docs, list) else docs
-    docs_list = _dedupe_docs_by_pmid(docs_list, limit=requested_top_n)
+    if len(docs_list) > requested_top_n:
+        docs_list = hybrid_rerank_documents(
+            retrieval_query,
+            docs_list,
+            alpha=float(getattr(config, "hybrid_alpha", 0.5) or 0.5),
+            limit=len(docs_list),
+            explain_reranking=log_pipeline,
+        )
+    docs_list = select_context_documents(docs_list, max_abstracts=requested_top_n)
     if log_pipeline:
         LOGGER.info(
             "[AGENT] Retriever | candidate_k=%s requested_top_n=%s reranker_active=%s docs=%s unique_pmids=%s",

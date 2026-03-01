@@ -65,6 +65,25 @@ class FollowupContextualizationTests(TestCase):
         )
         self.assertTrue(used)
         self.assertIn("DOAC", rewritten)
-        self.assertIn("Conversation summary", llm.last_prompt)
-        self.assertIn("Summarize DOAC versus warfarin evidence in AF.", llm.last_prompt)
+        self.assertIn("Previous topic:", llm.last_prompt)
+        self.assertIn("Conversation so far:", llm.last_prompt)
+        self.assertIn("Follow-up question:", llm.last_prompt)
+        self.assertIn("Maximum 25 words", llm.last_prompt)
         self.assertIn("DOACs in AF", summary)
+
+    def test_llm_rewrite_is_trimmed_to_twenty_five_words(self) -> None:
+        llm = _DummyLlm(
+            "This rewritten question intentionally contains more than twenty five words to verify the contextualizer clips the output to the requested maximum length for PubMed retrieval"
+        )
+        rewritten, _, used = contextualize_question(
+            user_query="What about bleeding risk?",
+            chat_messages=[
+                {"role": "user", "content": "Summarize DOAC versus warfarin evidence in AF."},
+                {"role": "assistant", "content": "We reviewed stroke and bleeding outcomes."},
+            ],
+            follow_up_mode=True,
+            llm=llm,
+        )
+
+        self.assertTrue(used)
+        self.assertLessEqual(len(rewritten.split()), 25)

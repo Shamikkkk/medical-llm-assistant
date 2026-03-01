@@ -26,6 +26,7 @@ from src.integrations.storage import (
 )
 from src.logging_utils import hash_query_text, log_event
 from src.types import PipelineResponse
+from src.utils.answers import annotate_answer_metadata
 from src.validators import validate_answer
 
 LOGGER = logging.getLogger("agent.orchestrator")
@@ -103,6 +104,7 @@ def invoke_agent_chat(
         request_id=current_request_id,
         include_paper_links=include_paper_links,
     )
+    _apply_answer_metadata_to_payload(payload)
     payload.update(
         _run_optional_validation(
             config=config,
@@ -272,6 +274,11 @@ def stream_agent_chat(
         answer_text += str(chunk)
         yield str(chunk)
 
+    answer_text, invalid_citations, evidence_quality = annotate_answer_metadata(
+        answer_text,
+        _source_pmids(sources),
+    )
+
     payload: PipelineResponse = {
         "status": "answered",
         "answer": answer_text,
@@ -294,6 +301,10 @@ def stream_agent_chat(
             "total_ms": round((perf_counter() - start_time) * 1000.0, 3),
         },
     }
+    if invalid_citations:
+        payload["invalid_citations"] = invalid_citations
+    if evidence_quality:
+        payload["evidence_quality"] = evidence_quality
     payload.update(
         _run_optional_validation(
             config=config,
@@ -676,7 +687,38 @@ def _build_cached_answer_payload(
     timings["answer_cache_lookup_ms"] = round(lookup_ms, 3)
     timings["total_ms"] = round(lookup_ms, 3)
     payload["timings"] = timings
+    _apply_answer_metadata_to_payload(payload)
     return payload
+
+
+def _apply_answer_metadata_to_payload(payload: dict[str, Any]) -> None:
+    answer_text = str(payload.get("answer") or payload.get("message") or "").strip()
+    if not answer_text:
+        return
+    cleaned_answer, invalid_citations, evidence_quality = annotate_answer_metadata(
+        answer_text,
+        _source_pmids(payload.get("sources", []) or []),
+    )
+    if "answer" in payload:
+        payload["answer"] = cleaned_answer
+    elif "message" in payload:
+        payload["message"] = cleaned_answer
+    if invalid_citations:
+        payload["invalid_citations"] = invalid_citations
+    elif "invalid_citations" in payload:
+        payload.pop("invalid_citations", None)
+    if evidence_quality:
+        payload["evidence_quality"] = evidence_quality
+    elif "evidence_quality" in payload:
+        payload.pop("evidence_quality", None)
+
+
+def _source_pmids(sources: list[Mapping[str, Any]] | list[dict[str, Any]]) -> list[str]:
+    return [
+        str(item.get("pmid", "") or "").strip()
+        for item in sources or []
+        if str(item.get("pmid", "") or "").strip()
+    ]
 
 
 def _log_agent_request(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest import TestCase
 
-from src.ui.loading_messages import detect_topic, pick_loading_message
+from src.utils.loading import detect_topic, pick_loading_message
 
 
 class LoadingMessageTests(TestCase):

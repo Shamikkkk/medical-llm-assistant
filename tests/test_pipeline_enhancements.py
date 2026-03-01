@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +16,8 @@ def _config(
     hybrid_retrieval: bool = False,
     max_abstracts: int = 8,
     max_context_abstracts: int | None = None,
+    multi_strategy_retrieval: bool = True,
+    retrieval_candidate_multiplier: int = 3,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         data_dir=Path("./data"),
@@ -25,6 +27,8 @@ def _config(
         max_context_abstracts=max_abstracts if max_context_abstracts is None else max_context_abstracts,
         max_context_tokens=2500,
         context_trim_strategy="truncate",
+        multi_strategy_retrieval=multi_strategy_retrieval,
+        retrieval_candidate_multiplier=retrieval_candidate_multiplier,
         hybrid_retrieval=hybrid_retrieval,
         hybrid_alpha=0.5,
         citation_alignment=False,
@@ -101,6 +105,19 @@ class _FakeInvokeChain:
         return _FakeMessage("Answer with PMID 12345.")
 
 
+class _StructuredInvokeChain:
+    def invoke(self, *_args, **_kwargs):
+        return _FakeMessage(
+            "## Direct Answer\n"
+            "Warfarin reduced stroke risk.\n\n"
+            "## Evidence Summary\n"
+            "- Stroke risk was lower with warfarin [PMID: 12345].\n"
+            "- An unsupported citation slipped in [PMID: 99999999].\n\n"
+            "## Evidence Quality\n"
+            "Moderate because the evidence is observational and mixed.\n"
+        )
+
+
 class _ImmediateFuture:
     def __init__(self, value):
         self._value = value
@@ -142,9 +159,53 @@ def _collect_stream(generator) -> tuple[list[str], dict]:
             return chunks, dict(stop.value or {})
 
 
+@contextmanager
+def _patch_multi_strategy_search(pmids: list[str]):
+    with ExitStack() as stack:
+        yield {
+            "queries": stack.enter_context(
+                patch("src.core.pipeline.build_multi_strategy_queries", return_value=["trial evidence"])
+            ),
+            "search": stack.enter_context(
+                patch("src.core.pipeline.multi_strategy_esearch", return_value=pmids)
+            ),
+        }
+
+
+@contextmanager
+def _patch_generation_runtime(*, chat_chain):
+    with ExitStack() as stack:
+        yield {
+            "build_rag_chain": stack.enter_context(
+                patch("src.core.pipeline.build_rag_chain", return_value=object())
+            ),
+            "build_chat_chain": stack.enter_context(
+                patch("src.core.pipeline.build_chat_chain", return_value=chat_chain)
+            ),
+            "log_llm_usage": stack.enter_context(
+                patch("src.core.pipeline.log_llm_usage", return_value={})
+            ),
+            "store_answer_cache": stack.enter_context(
+                patch("src.core.pipeline.store_answer_cache")
+            ),
+            "validation": stack.enter_context(
+                patch("src.core.pipeline._run_optional_validation", return_value={})
+            ),
+            "request_success": stack.enter_context(
+                patch("src.core.pipeline._log_request_success")
+            ),
+            "start_span": stack.enter_context(
+                patch(
+                    "src.core.pipeline.start_span",
+                    side_effect=lambda *args, **kwargs: nullcontext(),
+                )
+            ),
+        }
+
+
 @skipUnless(PIPELINE_DEPS_AVAILABLE, "langchain_core is not installed")
 class PipelineEnhancementTests(TestCase):
-    def _invoke_with_patches(self, *, include_paper_links: bool) -> dict:
+    def _invoke_with_patches(self, *, include_paper_links: bool, chat_chain: object | None = None) -> dict:
         from src.core.pipeline import _invoke_chat_impl
         from src.core.scope import ScopeResult
 
@@ -165,13 +226,14 @@ class PipelineEnhancementTests(TestCase):
             "context_top_k": 4,
             "retrieval_ms": 12.5,
         }
+        chat_chain = chat_chain or _FakeInvokeChain()
 
         with (
             patch("src.core.pipeline.classify_intent_details", return_value={"label": "medical", "confidence": 0.8}),
             patch("src.core.pipeline.classify_scope", return_value=scope),
             patch("src.core.pipeline._prepare_chat_context", return_value=context),
             patch("src.core.pipeline.build_rag_chain", return_value=object()),
-            patch("src.core.pipeline.build_chat_chain", return_value=_FakeInvokeChain()),
+            patch("src.core.pipeline.build_chat_chain", return_value=chat_chain),
             patch("src.core.pipeline.log_llm_usage", return_value={}),
             patch("src.core.pipeline._run_optional_validation", return_value={}),
             patch("src.core.pipeline._log_request_success"),
@@ -305,7 +367,11 @@ class PipelineEnhancementTests(TestCase):
         from src.core.pipeline import _prepare_chat_context
         from src.core.scope import ScopeResult
 
-        config = _config(use_reranker=False, max_abstracts=8)
+        config = _config(
+            use_reranker=False,
+            max_abstracts=8,
+            retrieval_candidate_multiplier=1,
+        )
         scope = ScopeResult("BIOMEDICAL", True, "ok", None, None)
         cached_pmids = [str(10000 + index) for index in range(8)]
         refreshed_records = _make_records(12)
@@ -321,7 +387,8 @@ class PipelineEnhancementTests(TestCase):
             patch("src.core.pipeline.get_query_cache_store", return_value=object()),
             patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
             patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
-            patch("src.core.pipeline.pubmed_esearch", return_value=refreshed_pmids) as mock_esearch,
+            patch("src.core.pipeline.build_multi_strategy_queries", return_value=["trial evidence"]) as mock_queries,
+            patch("src.core.pipeline.multi_strategy_esearch", return_value=refreshed_pmids) as mock_esearch,
             patch("src.core.pipeline.pubmed_efetch", return_value=refreshed_records),
             patch("src.core.pipeline.to_documents", return_value=refreshed_docs),
             patch("src.core.pipeline.remember_query_result") as mock_remember,
@@ -344,7 +411,8 @@ class PipelineEnhancementTests(TestCase):
         self.assertFalse(result["cache_hit"])
         self.assertEqual(len(result["docs_preview"]), 10)
         self.assertEqual(result["abstracts_fetched"], 12)
-        self.assertGreaterEqual(mock_esearch.call_args.kwargs["retmax"], 10)
+        self.assertEqual(mock_queries.call_args.args[0], "sample question")
+        self.assertGreaterEqual(mock_esearch.call_args.kwargs["retmax_each"], 10)
         mock_remember.assert_called_once()
         self.assertEqual(
             mock_remember.call_args.kwargs["pmids"],
@@ -355,7 +423,11 @@ class PipelineEnhancementTests(TestCase):
         from src.core.pipeline import _prepare_chat_context
         from src.core.scope import ScopeResult
 
-        config = _config(use_reranker=False, max_abstracts=8)
+        config = _config(
+            use_reranker=False,
+            max_abstracts=8,
+            retrieval_candidate_multiplier=1,
+        )
         scope = ScopeResult("BIOMEDICAL", True, "ok", None, None)
         cached_records = _make_records(10)
         cached_pmids = [record["pmid"] for record in cached_records]
@@ -370,7 +442,7 @@ class PipelineEnhancementTests(TestCase):
             patch("src.core.pipeline.get_query_cache_store", return_value=object()),
             patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
             patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
-            patch("src.core.pipeline.pubmed_esearch") as mock_esearch,
+            patch("src.core.pipeline.multi_strategy_esearch") as mock_esearch,
             patch("src.core.pipeline.pubmed_efetch", return_value=cached_records),
             patch("src.core.pipeline.to_documents", return_value=cached_docs),
             patch("src.core.pipeline.remember_query_result") as mock_remember,
@@ -412,6 +484,17 @@ class PipelineEnhancementTests(TestCase):
             "Only 1 unique papers were available for this query.",
         )
 
+    def test_invoke_chat_impl_cleans_invalid_citations_and_extracts_evidence_quality(self) -> None:
+        payload = self._invoke_with_patches(
+            include_paper_links=True,
+            chat_chain=_StructuredInvokeChain(),
+        )
+
+        self.assertEqual(payload.get("evidence_quality"), "Moderate")
+        self.assertEqual(payload.get("invalid_citations"), ["99999999"])
+        self.assertIn("[PMID: 12345]", payload["answer"])
+        self.assertIn("[PMID: UNAVAILABLE]", payload["answer"])
+
     def test_top_n_10_is_not_capped_by_max_abstracts_in_invoke_path(self) -> None:
         from src.core.pipeline import _invoke_chat_impl
         from src.core.scope import ScopeResult
@@ -432,18 +515,12 @@ class PipelineEnhancementTests(TestCase):
             patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
             patch("src.core.pipeline.lookup_query_result_cache", return_value=None),
             patch("src.core.pipeline.rewrite_to_pubmed_query", return_value="trial evidence"),
-            patch("src.core.pipeline.pubmed_esearch", return_value=pmids) as mock_esearch,
+            _patch_multi_strategy_search(pmids) as search_patches,
             patch("src.core.pipeline.pubmed_efetch", return_value=records),
             patch("src.core.pipeline.to_documents", return_value=docs),
             patch("src.core.pipeline.remember_query_result"),
             patch("src.core.pipeline.upsert_abstracts", return_value=12),
-            patch("src.core.pipeline.build_rag_chain", return_value=object()) as mock_build_rag_chain,
-            patch("src.core.pipeline.build_chat_chain", return_value=_FakeInvokeChain()),
-            patch("src.core.pipeline.log_llm_usage", return_value={}),
-            patch("src.core.pipeline.store_answer_cache"),
-            patch("src.core.pipeline._run_optional_validation", return_value={}),
-            patch("src.core.pipeline._log_request_success"),
-            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+            _patch_generation_runtime(chat_chain=_FakeInvokeChain()) as runtime_patches,
         ):
             payload = _invoke_chat_impl(
                 query="sample question",
@@ -460,8 +537,8 @@ class PipelineEnhancementTests(TestCase):
         self.assertEqual(len(payload["docs_preview"]), 10)
         self.assertEqual(len(payload["retrieved_contexts"]), 10)
         self.assertNotIn("source_count_note", payload)
-        self.assertGreaterEqual(mock_esearch.call_args.kwargs["retmax"], 10)
-        self.assertEqual(mock_build_rag_chain.call_args.kwargs["max_abstracts"], 8)
+        self.assertGreaterEqual(search_patches["search"].call_args.kwargs["retmax_each"], 10)
+        self.assertEqual(runtime_patches["build_rag_chain"].call_args.kwargs["max_abstracts"], 8)
 
     def test_top_n_10_is_not_capped_by_max_abstracts_in_stream_path(self) -> None:
         from src.core.pipeline import _stream_chat_impl
@@ -483,18 +560,12 @@ class PipelineEnhancementTests(TestCase):
             patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
             patch("src.core.pipeline.lookup_query_result_cache", return_value=None),
             patch("src.core.pipeline.rewrite_to_pubmed_query", return_value="trial evidence"),
-            patch("src.core.pipeline.pubmed_esearch", return_value=pmids),
+            _patch_multi_strategy_search(pmids),
             patch("src.core.pipeline.pubmed_efetch", return_value=records),
             patch("src.core.pipeline.to_documents", return_value=docs),
             patch("src.core.pipeline.remember_query_result"),
             patch("src.core.pipeline.upsert_abstracts", return_value=12),
-            patch("src.core.pipeline.build_rag_chain", return_value=object()) as mock_build_rag_chain,
-            patch("src.core.pipeline.build_chat_chain", return_value=_FakeStreamingChain()),
-            patch("src.core.pipeline.log_llm_usage", return_value={}),
-            patch("src.core.pipeline.store_answer_cache"),
-            patch("src.core.pipeline._run_optional_validation", return_value={}),
-            patch("src.core.pipeline._log_request_success"),
-            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+            _patch_generation_runtime(chat_chain=_FakeStreamingChain()) as runtime_patches,
         ):
             stream = _stream_chat_impl(
                 query="sample question",
@@ -513,7 +584,7 @@ class PipelineEnhancementTests(TestCase):
         self.assertEqual(len(payload["docs_preview"]), 10)
         self.assertEqual(len(payload["retrieved_contexts"]), 10)
         self.assertNotIn("source_count_note", payload)
-        self.assertEqual(mock_build_rag_chain.call_args.kwargs["max_abstracts"], 8)
+        self.assertEqual(runtime_patches["build_rag_chain"].call_args.kwargs["max_abstracts"], 8)
 
     def test_top_n_shortfall_returns_available_unique_papers_and_note(self) -> None:
         from src.core.pipeline import _invoke_chat_impl
@@ -535,18 +606,12 @@ class PipelineEnhancementTests(TestCase):
             patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
             patch("src.core.pipeline.lookup_query_result_cache", return_value=None),
             patch("src.core.pipeline.rewrite_to_pubmed_query", return_value="trial evidence"),
-            patch("src.core.pipeline.pubmed_esearch", return_value=pmids),
+            _patch_multi_strategy_search(pmids),
             patch("src.core.pipeline.pubmed_efetch", return_value=records),
             patch("src.core.pipeline.to_documents", return_value=docs),
             patch("src.core.pipeline.remember_query_result"),
             patch("src.core.pipeline.upsert_abstracts", return_value=6),
-            patch("src.core.pipeline.build_rag_chain", return_value=object()),
-            patch("src.core.pipeline.build_chat_chain", return_value=_FakeInvokeChain()),
-            patch("src.core.pipeline.log_llm_usage", return_value={}),
-            patch("src.core.pipeline.store_answer_cache"),
-            patch("src.core.pipeline._run_optional_validation", return_value={}),
-            patch("src.core.pipeline._log_request_success"),
-            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+            _patch_generation_runtime(chat_chain=_FakeInvokeChain()),
         ):
             payload = _invoke_chat_impl(
                 query="sample question",
@@ -589,18 +654,12 @@ class PipelineEnhancementTests(TestCase):
             patch("src.core.pipeline.get_query_cache_store", return_value=object()),
             patch("src.core.pipeline.get_abstract_store", return_value=abstract_store),
             patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
-            patch("src.core.pipeline.pubmed_esearch", return_value=refreshed_pmids) as mock_esearch,
+            _patch_multi_strategy_search(refreshed_pmids) as search_patches,
             patch("src.core.pipeline.pubmed_efetch", return_value=records),
             patch("src.core.pipeline.to_documents", return_value=docs),
             patch("src.core.pipeline.remember_query_result"),
             patch("src.core.pipeline.upsert_abstracts", return_value=10),
-            patch("src.core.pipeline.build_rag_chain", return_value=object()),
-            patch("src.core.pipeline.build_chat_chain", return_value=_FakeInvokeChain()),
-            patch("src.core.pipeline.log_llm_usage", return_value={}),
-            patch("src.core.pipeline.store_answer_cache"),
-            patch("src.core.pipeline._run_optional_validation", return_value={}),
-            patch("src.core.pipeline._log_request_success"),
-            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+            _patch_generation_runtime(chat_chain=_FakeInvokeChain()),
         ):
             payload = _invoke_chat_impl(
                 query="sample question",
@@ -615,7 +674,7 @@ class PipelineEnhancementTests(TestCase):
         self.assertEqual(payload["status"], "answered")
         self.assertEqual(len(payload["docs_preview"]), 10)
         self.assertEqual(len(payload["sources"]), 10)
-        self.assertGreaterEqual(mock_esearch.call_args.kwargs["retmax"], 10)
+        self.assertGreaterEqual(search_patches["search"].call_args.kwargs["retmax_each"], 10)
 
     def test_sources_are_backfilled_from_docs_preview_when_retriever_returns_fewer_docs(self) -> None:
         from src.core.pipeline import _invoke_chat_impl
@@ -637,18 +696,12 @@ class PipelineEnhancementTests(TestCase):
             patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
             patch("src.core.pipeline.lookup_query_result_cache", return_value=None),
             patch("src.core.pipeline.rewrite_to_pubmed_query", return_value="trial evidence"),
-            patch("src.core.pipeline.pubmed_esearch", return_value=pmids),
+            _patch_multi_strategy_search(pmids),
             patch("src.core.pipeline.pubmed_efetch", return_value=fetched_records),
             patch("src.core.pipeline.to_documents", return_value=retrieved_docs),
             patch("src.core.pipeline.remember_query_result"),
             patch("src.core.pipeline.upsert_abstracts", return_value=8),
-            patch("src.core.pipeline.build_rag_chain", return_value=object()),
-            patch("src.core.pipeline.build_chat_chain", return_value=_FakeInvokeChain()),
-            patch("src.core.pipeline.log_llm_usage", return_value={}),
-            patch("src.core.pipeline.store_answer_cache"),
-            patch("src.core.pipeline._run_optional_validation", return_value={}),
-            patch("src.core.pipeline._log_request_success"),
-            patch("src.core.pipeline.start_span", side_effect=lambda *args, **kwargs: nullcontext()),
+            _patch_generation_runtime(chat_chain=_FakeInvokeChain()),
         ):
             payload = _invoke_chat_impl(
                 query="sample question",

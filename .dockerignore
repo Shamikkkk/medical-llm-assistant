@@ -27,7 +27,9 @@ dist/
 *.egg-info/
 
 # Frontend/package caches
-node_modules/
+node_modules
+**/node_modules
+frontend/node_modules
 
 # Local secrets
 .env

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest import TestCase
 
-from src.app_state import build_branched_messages
+from api.session_store import build_branched_messages
 from src.history import clear_session_history, get_session_history, replace_session_history
 
 

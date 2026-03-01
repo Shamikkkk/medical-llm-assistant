@@ -1,0 +1,20 @@
+<!-- Created by Codex - Section 2 -->
+
+<div class="app-root" [class.dark]="themeService.isDark()">
+  <div class="shell">
+    <app-sidebar />
+    <main class="main-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow mono">Clinical Precision Workspace</p>
+          <h1 class="display">Medical LLM Assistant</h1>
+          <p class="subtitle">
+            Explore PubMed-grounded answers, branch conversations like Claude, and keep evidence visible at every turn.
+          </p>
+        </div>
+        <app-theme-toggle />
+      </header>
+      <router-outlet />
+    </main>
+  </div>
+</div>

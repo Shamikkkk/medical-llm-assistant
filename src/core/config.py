@@ -44,6 +44,8 @@ class AppConfig:
     max_context_abstracts: int
     max_context_tokens: int
     context_trim_strategy: str
+    multi_strategy_retrieval: bool
+    retrieval_candidate_multiplier: int
     hybrid_retrieval: bool
     hybrid_alpha: float
     citation_alignment: bool
@@ -78,6 +80,8 @@ class AppConfig:
             "max_context_abstracts": self.max_context_abstracts,
             "max_context_tokens": self.max_context_tokens,
             "context_trim_strategy": self.context_trim_strategy,
+            "multi_strategy_retrieval": self.multi_strategy_retrieval,
+            "retrieval_candidate_multiplier": self.retrieval_candidate_multiplier,
             "hybrid_retrieval": self.hybrid_retrieval,
             "hybrid_alpha": self.hybrid_alpha,
             "citation_alignment": self.citation_alignment,
@@ -168,6 +172,11 @@ def load_config() -> AppConfig:
     context_trim_strategy = (
         os.getenv("CONTEXT_TRIM_STRATEGY", "truncate").strip().lower() or "truncate"
     )
+    multi_strategy_retrieval = _parse_bool(os.getenv("MULTI_STRATEGY_RETRIEVAL", "true"))
+    retrieval_candidate_multiplier = _parse_int(
+        os.getenv("RETRIEVAL_CANDIDATE_MULTIPLIER"),
+        default=3,
+    )
     hybrid_retrieval = _parse_bool(os.getenv("HYBRID_RETRIEVAL", "false"))
     hybrid_alpha = _parse_float(os.getenv("HYBRID_ALPHA"), default=0.5)
     citation_alignment = _parse_bool(os.getenv("CITATION_ALIGNMENT", "true"))
@@ -244,6 +253,8 @@ def load_config() -> AppConfig:
         max_context_abstracts=max(1, min(20, max_context_abstracts)),
         max_context_tokens=max(256, min(20000, max_context_tokens)),
         context_trim_strategy=context_trim_strategy,
+        multi_strategy_retrieval=multi_strategy_retrieval,
+        retrieval_candidate_multiplier=max(1, min(10, retrieval_candidate_multiplier)),
         hybrid_retrieval=hybrid_retrieval,
         hybrid_alpha=max(0.0, min(1.0, hybrid_alpha)),
         citation_alignment=citation_alignment,

@@ -11,6 +11,21 @@ FOLLOWUP_HINT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+REWRITE_PROMPT = """You are rewriting a follow-up question so it is fully self-contained for a PubMed literature search.
+
+Previous topic: {topic_summary}
+Conversation so far: {history}
+Follow-up question: {query}
+
+Rules:
+- Produce exactly one rewritten question
+- Include the medical condition, intervention, and outcome from prior context
+- Do NOT include phrases like "as discussed" or "as mentioned"
+- Maximum 25 words
+- Output ONLY the rewritten question, nothing else
+
+Rewritten question:"""
+
 
 def contextualize_question(
     *,
@@ -35,13 +50,11 @@ def contextualize_question(
     if not should_contextualize:
         return query, summary_hint, False
 
-    last_user_question = _last_user_question(chat_messages)
     if llm is not None:
         rewritten = _rewrite_with_llm(
             query=query,
             history=history_excerpt,
             topic_summary=summary_hint,
-            last_user_question=last_user_question,
             llm=llm,
         )
         if rewritten:
@@ -49,6 +62,7 @@ def contextualize_question(
             return rewritten, summary_hint, rewritten != query
 
     # Heuristic fallback.
+    last_user_question = _last_user_question(chat_messages)
     context_hint = summary_hint or last_user_question or history_excerpt[:180]
     if context_hint:
         rewritten = (
@@ -106,20 +120,12 @@ def _rewrite_with_llm(
     query: str,
     history: str,
     topic_summary: str,
-    last_user_question: str,
     llm: Any,
 ) -> str | None:
-    prompt = (
-        "Rewrite the user question into one standalone biomedical research question.\n"
-        "Rules:\n"
-        "- Preserve intent exactly.\n"
-        "- Resolve pronouns/references using history.\n"
-        "- Explicitly include missing topic context from prior turns.\n"
-        "- Return only one sentence/question, no explanation.\n"
-        f"Topic summary: {topic_summary}\n"
-        f"Previous user question: {last_user_question}\n"
-        f"History:\n{history}\n\n"
-        f"User question:\n{query}\n"
+    prompt = REWRITE_PROMPT.format(
+        topic_summary=topic_summary,
+        history=history,
+        query=query,
     )
     try:
         if hasattr(llm, "invoke"):
@@ -138,7 +144,7 @@ def _rewrite_with_llm(
         cleaned = cleaned.splitlines()[0].strip()
     if not cleaned:
         return None
-    return cleaned[:320]
+    return " ".join(cleaned.split()[:25]).strip()
 
 
 def _extract_text(payload: Any) -> str:

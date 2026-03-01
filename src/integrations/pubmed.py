@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 from urllib.parse import urlencode
 import time
@@ -15,6 +16,14 @@ from src.papers.doi import build_doi_url, extract_doi
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 REQUEST_TIMEOUT_SECONDS = 20
 REQUEST_DELAY_SECONDS = 0.34
+
+PUBMED_REWRITE_PROMPT = """Convert this medical question into a concise PubMed search query.
+Use MeSH terms where applicable. Use AND to combine concepts. Do not use quotes. Maximum 12 words.
+Question: {query}
+PubMed query:"""
+
+_MESH_QUERY_PROMPT = "Rewrite this as a PubMed query using MeSH terms only: {query}"
+_BROAD_QUERY_PROMPT = "Write a broader PubMed query using OR to capture related concepts: {query}"
 
 
 def build_esearch_url(term: str, retmax: int = 10) -> str:
@@ -34,6 +43,53 @@ def pubmed_esearch(term: str, retmax: int = 10) -> List[str]:
         return []
     id_list = data.get("esearchresult", {}).get("idlist", [])
     return [str(pmid) for pmid in id_list]
+
+
+def build_multi_strategy_queries(user_query: str, llm: Any | None) -> list[str]:
+    normalized_query = normalize_user_query(user_query).strip() or str(user_query or "").strip()
+    primary_query = rewrite_to_pubmed_query(normalized_query, llm)
+    if not llm:
+        return _unique_queries([primary_query or normalized_query])
+
+    mesh_query = _clean_query(
+        _invoke_llm(llm, _MESH_QUERY_PROMPT.format(query=normalized_query), usage_tag="rewrite.mesh")
+    )
+    broad_query = _clean_query(
+        _invoke_llm(llm, _BROAD_QUERY_PROMPT.format(query=normalized_query), usage_tag="rewrite.broad")
+    )
+    return _unique_queries([primary_query, mesh_query, broad_query, normalized_query])
+
+
+def multi_strategy_esearch(queries: list[str], retmax_each: int = 15) -> list[str]:
+    normalized_queries = _unique_queries(queries)
+    if not normalized_queries:
+        return []
+
+    effective_retmax = max(1, int(retmax_each))
+    results_by_index: dict[int, list[str]] = {}
+    with ThreadPoolExecutor(max_workers=min(4, len(normalized_queries))) as executor:
+        future_to_index = {
+            executor.submit(pubmed_esearch, query, effective_retmax): index
+            for index, query in enumerate(normalized_queries)
+        }
+        for future, index in future_to_index.items():
+            try:
+                results_by_index[index] = [str(pmid) for pmid in future.result() if str(pmid).strip()]
+            except Exception:
+                results_by_index[index] = []
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    cap = effective_retmax * 2
+    for index in range(len(normalized_queries)):
+        for pmid in results_by_index.get(index, []):
+            if pmid in seen:
+                continue
+            seen.add(pmid)
+            merged.append(pmid)
+            if len(merged) >= cap:
+                return merged
+    return merged
 
 
 def pubmed_efetch(pmids: List[str]) -> List[Dict[str, Any]]:
@@ -114,35 +170,14 @@ def to_documents(records: List[Dict[str, Any]]) -> List[Document]:
 
 
 def rewrite_to_pubmed_query(user_query: str, llm: Any | None) -> str:
-    """Rewrite a user query into a concise PubMed-ready boolean query."""
-    normalized_query = normalize_user_query(user_query).strip() or user_query.strip()
+    normalized_query = normalize_user_query(user_query).strip() or str(user_query or "").strip()
     if not llm:
         return normalized_query
 
-    prompt = (
-        "You are a medical search assistant. Rewrite the user's question into a "
-        "PubMed-ready query.\n"
-        "Rules:\n"
-        "- Include key concepts using boolean operators (AND/OR).\n"
-        "- Keep the topic domain-appropriate for the user question.\n"
-        "- Keep it short (<= 200 characters if possible).\n"
-        "- Output only the final query string, no quotes or extra text.\n"
-        f"User query: {normalized_query}\n"
-    )
-
+    prompt = PUBMED_REWRITE_PROMPT.format(query=normalized_query)
     rewritten = _invoke_llm(llm, prompt, usage_tag="rewrite")
-    if not rewritten:
-        return normalized_query
-
-    cleaned = rewritten.strip().strip('"').strip("'")
-    if "\n" in cleaned:
-        cleaned = cleaned.splitlines()[0].strip()
-    if not cleaned:
-        return normalized_query
-
-    if len(cleaned) > 200:
-        cleaned = cleaned[:200].rstrip()
-    return cleaned
+    cleaned = _clean_query(rewritten)
+    return cleaned or normalized_query
 
 
 def _get_json(url: str, params: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
@@ -184,6 +219,30 @@ def _coerce_to_text(result: Any) -> str:
     if hasattr(result, "content"):
         return str(result.content)
     return str(result)
+
+
+def _clean_query(value: str | None) -> str:
+    cleaned = str(value or "").strip().strip('"').strip("'")
+    if "\n" in cleaned:
+        cleaned = cleaned.splitlines()[0].strip()
+    if len(cleaned) > 200:
+        cleaned = cleaned[:200].rstrip()
+    return cleaned
+
+
+def _unique_queries(queries: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        cleaned = _clean_query(query)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(cleaned)
+    return normalized
 
 
 def _get_text_from(node: ET.Element | None) -> str | None:
@@ -256,4 +315,3 @@ def _normalize_pmcid(value: str) -> str:
         return text.upper()
     digits = "".join(ch for ch in text if ch.isdigit())
     return f"PMC{digits}" if digits else ""
-

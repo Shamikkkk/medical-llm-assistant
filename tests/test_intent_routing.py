@@ -19,6 +19,8 @@ def _config() -> SimpleNamespace:
         max_context_abstracts=8,
         max_context_tokens=2500,
         context_trim_strategy="truncate",
+        multi_strategy_retrieval=True,
+        retrieval_candidate_multiplier=3,
         hybrid_retrieval=False,
         hybrid_alpha=0.5,
         citation_alignment=False,
@@ -192,7 +194,8 @@ class PipelineIntentRoutingTests(TestCase):
             patch("src.core.pipeline.get_abstract_store", return_value=object()),
             patch("src.core.pipeline._prepare_reranker_resources", return_value=None),
             patch("src.core.pipeline.lookup_query_result_cache", return_value=None),
-            patch("src.core.pipeline.pubmed_esearch", return_value=pmids) as mock_esearch,
+            patch("src.core.pipeline.build_multi_strategy_queries", return_value=["quit smoking"]) as mock_queries,
+            patch("src.core.pipeline.multi_strategy_esearch", return_value=pmids) as mock_esearch,
             patch("src.core.pipeline.pubmed_efetch", return_value=records),
             patch("src.core.pipeline.to_documents", return_value=docs),
             patch("src.core.pipeline.remember_query_result"),
@@ -216,4 +219,5 @@ class PipelineIntentRoutingTests(TestCase):
         self.assertNotEqual(payload["intent_label"], "smalltalk")
         self.assertIn("quit smoking", payload["pubmed_query"])
         self.assertEqual(len(payload["docs_preview"]), 10)
-        self.assertGreaterEqual(mock_esearch.call_args.kwargs["retmax"], 10)
+        self.assertEqual(mock_queries.call_args.args[0], "how to quit smoking")
+        self.assertGreaterEqual(mock_esearch.call_args.kwargs["retmax_each"], 10)

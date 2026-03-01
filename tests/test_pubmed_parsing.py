@@ -100,3 +100,51 @@ class PubMedParsingTests(TestCase):
         self.assertEqual(doc.metadata["pmid"], "12345")
         self.assertEqual(doc.metadata["doi"], "10.1000/example-doi")
         self.assertIn("Results text.", doc.page_content)
+
+    @patch("src.integrations.pubmed.log_llm_usage", return_value={})
+    def test_build_multi_strategy_queries_returns_complementary_queries(self, _mock_log_usage) -> None:
+        from src.integrations.pubmed import build_multi_strategy_queries
+
+        class _FakeMessage:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _FakeLLM:
+            def invoke(self, prompt: str) -> _FakeMessage:
+                if "MeSH terms only" in prompt:
+                    return _FakeMessage("Atrial Fibrillation[MeSH] AND Warfarin")
+                if "capture related concepts" in prompt:
+                    return _FakeMessage("warfarin OR anticoagulants AND atrial fibrillation")
+                return _FakeMessage("atrial fibrillation AND warfarin stroke")
+
+        queries = build_multi_strategy_queries(
+            "warfarin for stroke prevention in atrial fibrillation",
+            _FakeLLM(),
+        )
+
+        self.assertEqual(
+            queries[:3],
+            [
+                "atrial fibrillation AND warfarin stroke",
+                "Atrial Fibrillation[MeSH] AND Warfarin",
+                "warfarin OR anticoagulants AND atrial fibrillation",
+            ],
+        )
+        self.assertIn(
+            "warfarin for stroke prevention in atrial fibrillation",
+            queries,
+        )
+
+    @patch("src.integrations.pubmed.pubmed_esearch")
+    def test_multi_strategy_esearch_merges_unique_pmids_in_query_order(self, mock_esearch) -> None:
+        from src.integrations.pubmed import multi_strategy_esearch
+
+        mock_esearch.side_effect = [
+            ["1", "2", "3"],
+            ["3", "4"],
+            ["2", "5"],
+        ]
+
+        pmids = multi_strategy_esearch(["q1", "q2", "q3"], retmax_each=3)
+
+        self.assertEqual(pmids, ["1", "2", "3", "4", "5"])

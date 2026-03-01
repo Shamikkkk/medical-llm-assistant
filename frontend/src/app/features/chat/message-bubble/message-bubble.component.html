@@ -1,0 +1,49 @@
+<!-- Created by Codex - Section 2 -->
+
+<article
+  class="message"
+  [class.user]="message.role === 'user'"
+  [class.assistant]="message.role === 'assistant'"
+  [class.dimmed]="dimmed"
+>
+  <header class="message-header">
+    <div class="meta">
+      <span class="role mono">{{ message.role === 'assistant' ? 'Assistant' : 'User' }}</span>
+      <span class="timestamp">{{ message.created_at | relativeTime }}</span>
+    </div>
+
+    <div class="badges">
+      @if (message.answer_cache_hit) {
+        <span class="badge cache">&#9889; Cached</span>
+      }
+      @if (message.evidence_quality) {
+        <span class="badge quality" [class]="evidenceTone">{{ message.evidence_quality }}</span>
+      }
+      @if (showEdit && message.role === 'user') {
+        <button type="button" class="edit" (click)="editRequested.emit(messageIndex)">
+          <lucide-angular [img]="pencilIcon" size="14" />
+          Edit
+        </button>
+      }
+    </div>
+  </header>
+
+  <div class="body" [class.mono]="message.role === 'user'">
+    @if (message.role === 'assistant') {
+      <div [innerHTML]="message.content | markdown"></div>
+    } @else {
+      <p>{{ message.content }}</p>
+    }
+    @if (showStreamingCursor) {
+      <app-streaming-cursor />
+    }
+  </div>
+
+  @if (message.role === 'assistant' && showSources && message.sources?.length) {
+    <div class="sources">
+      @for (source of message.sources || []; track source.pmid || $index) {
+        <app-source-card [source]="source" />
+      }
+    </div>
+  }
+</article>

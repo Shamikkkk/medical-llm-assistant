@@ -1,0 +1,51 @@
+/* Created by Codex - Section 2 */
+
+.composer {
+  display: grid;
+  gap: 0.9rem;
+  padding: 1.1rem;
+  border-radius: 1.2rem;
+}
+
+.mono {
+  margin: 0;
+  color: var(--accent);
+  font-size: 0.8rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+textarea {
+  width: 100%;
+  min-height: 7rem;
+  resize: vertical;
+  padding: 0.95rem 1rem;
+  border-radius: 1rem;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-panel) 74%, transparent);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+}
+
+.primary,
+.secondary {
+  min-height: 2.7rem;
+  padding: 0 1rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.primary {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.secondary {
+  background: transparent;
+  color: var(--text-muted);
+}

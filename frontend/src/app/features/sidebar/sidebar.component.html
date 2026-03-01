@@ -1,0 +1,134 @@
+<!-- Created by Codex - Section 2 -->
+
+<aside class="sidebar glass-panel" [class.collapsed]="!sessionService.sidebarOpen()">
+  <button type="button" class="collapse-toggle" (click)="sessionService.toggleSidebar()">
+    <lucide-angular [img]="sessionService.sidebarOpen() ? collapseIcon : expandIcon" size="18" />
+  </button>
+
+  @if (sessionService.sidebarOpen()) {
+    <div class="sidebar-content">
+      <section class="top">
+        <button type="button" class="new-chat" (click)="createChat()">
+          <lucide-angular [img]="plusIcon" size="16" />
+          <span>New Chat</span>
+        </button>
+
+        <label class="search">
+          <lucide-angular [img]="searchIcon" size="16" />
+          <input
+            type="search"
+            placeholder="Filter chats"
+            [ngModel]="filterText()"
+            (ngModelChange)="filterText.set($event)"
+          />
+        </label>
+      </section>
+
+      <section class="stack">
+        <div class="section-header">
+          <span class="mono">Recent Sessions</span>
+        </div>
+        <app-session-list
+          [sessions]="filteredSessions()"
+          [activeSessionId]="sessionService.activeSessionId()"
+          (sessionSelected)="selectSession($event)"
+          (sessionDeleted)="deleteSession($event)"
+        />
+      </section>
+
+      @if (sessionService.activeSession()) {
+        <section class="stack">
+          <div class="section-header">
+            <span class="mono">Branch Map</span>
+            <lucide-angular [img]="branchIcon" size="15" />
+          </div>
+          <app-branch-tree
+            [branches]="sessionService.branches()"
+            [activeBranchId]="sessionService.activeBranchId()"
+            (branchSelected)="selectBranch($event)"
+          />
+        </section>
+      }
+
+      <section class="controls">
+        <div class="section-header">
+          <span class="mono">Runtime Controls</span>
+          <span class="metric-badge">
+            {{ sessionService.lastResponseMs() ? (sessionService.lastResponseMs() | number: '1.0-0') + ' ms' : 'Idle' }}
+          </span>
+        </div>
+
+        <label class="field">
+          <span>Top-N papers</span>
+          <input
+            type="range"
+            min="1"
+            max="20"
+            [ngModel]="sessionService.topN()"
+            (ngModelChange)="sessionService.setTopN($event)"
+          />
+          <small>{{ sessionService.topN() }}</small>
+        </label>
+
+        <label class="toggle-row">
+          <span>Follow-up mode</span>
+          <input
+            type="checkbox"
+            [ngModel]="sessionService.followUpMode()"
+            (ngModelChange)="sessionService.setFollowUpMode($event)"
+          />
+        </label>
+
+        <label class="toggle-row">
+          <span>Show papers</span>
+          <input
+            type="checkbox"
+            [ngModel]="sessionService.showPapers()"
+            (ngModelChange)="sessionService.setShowPapers($event)"
+          />
+        </label>
+
+        <label class="field">
+          <span class="with-icon">
+            <lucide-angular [img]="cpuIcon" size="14" />
+            Compute device
+          </span>
+          <select
+            [ngModel]="sessionService.computeDevice()"
+            (ngModelChange)="sessionService.setComputeDevice($event)"
+          >
+            <option value="auto">auto</option>
+            <option value="cpu">cpu</option>
+            <option value="gpu">gpu</option>
+          </select>
+        </label>
+
+        <div class="export-row">
+          <button type="button" class="export-button" (click)="download('markdown')">
+            <lucide-angular [img]="markdownIcon" size="15" />
+            Markdown
+          </button>
+          <button type="button" class="export-button" (click)="download('json')">
+            <lucide-angular [img]="jsonIcon" size="15" />
+            JSON
+          </button>
+        </div>
+
+        <div class="cache-row">
+          <button type="button" class="ghost-button" disabled>
+            <lucide-angular [img]="cacheIcon" size="14" />
+            Query Cache
+          </button>
+          <button type="button" class="ghost-button" disabled>
+            <lucide-angular [img]="refreshIcon" size="14" />
+            Answer Cache
+          </button>
+          <button type="button" class="ghost-button" disabled>
+            <lucide-angular [img]="cacheIcon" size="14" />
+            Paper Cache
+          </button>
+        </div>
+      </section>
+    </div>
+  }
+</aside>

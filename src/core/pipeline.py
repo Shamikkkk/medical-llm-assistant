@@ -25,6 +25,8 @@ from src.intent import (
 )
 from src.integrations.nvidia import get_nvidia_llm
 from src.integrations.pubmed import (
+    build_multi_strategy_queries,
+    multi_strategy_esearch,
     pubmed_efetch,
     pubmed_esearch,
     rewrite_to_pubmed_query,
@@ -44,6 +46,7 @@ from src.integrations.storage import (
 from src.logging_utils import hash_query_text, log_event, log_llm_usage
 from src.observability.tracing import start_span
 from src.types import PipelineResponse, SourceItem
+from src.utils.answers import annotate_answer_metadata
 from src.validators import validate_answer
 
 LOGGER = logging.getLogger("pipeline.main")
@@ -112,13 +115,14 @@ class _PipelineRetriever:
                 except Exception:
                     docs_list = docs_list
 
-        if self._hybrid_retrieval and docs_list:
+        if docs_list and len(docs_list) > self._final_k:
             with start_span("rerank", attributes={"stage": "hybrid"}):
                 docs_list = hybrid_rerank_documents(
                     retrieval_query,
                     docs_list,
                     alpha=self._hybrid_alpha,
                     limit=len(docs_list),
+                    explain_reranking=self._log_pipeline,
                 )
         docs_list = select_context_documents(docs_list, max_abstracts=self._final_k)
 
@@ -486,6 +490,10 @@ def _invoke_chat_impl(
         top_n=requested_top_n,
         include_paper_links=include_paper_links,
     )
+    answer, invalid_citations, evidence_quality = annotate_answer_metadata(
+        answer,
+        _source_pmids(sources),
+    )
     validation_payload = _run_optional_validation(
         config=config,
         user_query=normalized_query,
@@ -534,6 +542,10 @@ def _invoke_chat_impl(
     }
     if alignment_issues:
         payload["alignment_issues"] = alignment_issues
+    if invalid_citations:
+        payload["invalid_citations"] = invalid_citations
+    if evidence_quality:
+        payload["evidence_quality"] = evidence_quality
     _add_source_count_note(
         payload,
         requested_top_n=requested_top_n,
@@ -816,6 +828,10 @@ def _stream_chat_impl(
         top_n=requested_top_n,
         include_paper_links=include_paper_links,
     )
+    answer_text, invalid_citations, evidence_quality = annotate_answer_metadata(
+        answer_text,
+        _source_pmids(sources),
+    )
     validation_payload = _run_optional_validation(
         config=config,
         user_query=normalized_query,
@@ -863,6 +879,10 @@ def _stream_chat_impl(
     }
     if alignment_issues:
         payload["alignment_issues"] = alignment_issues
+    if invalid_citations:
+        payload["invalid_citations"] = invalid_citations
+    if evidence_quality:
+        payload["evidence_quality"] = evidence_quality
     _add_source_count_note(
         payload,
         requested_top_n=requested_top_n,
@@ -913,9 +933,14 @@ def _prepare_chat_context(
     log_pipeline = bool(getattr(config, "log_pipeline", False))
     requested_top_n = _sanitize_top_n(top_n)
     context_top_k = _resolve_context_top_k(config, requested_top_n)
-    candidate_fetch_k = requested_top_n
-    if bool(getattr(config, "use_reranker", False)) or bool(getattr(config, "hybrid_retrieval", False)):
-        candidate_fetch_k = max(candidate_fetch_k, min(50, requested_top_n * 3))
+    retrieval_candidate_multiplier = max(
+        1,
+        int(getattr(config, "retrieval_candidate_multiplier", 3) or 3),
+    )
+    candidate_fetch_k = max(
+        requested_top_n,
+        min(50, requested_top_n * retrieval_candidate_multiplier),
+    )
     cache_store_retmax = max(candidate_fetch_k, QUERY_CACHE_PMID_STORE_LIMIT)
     cache_ttl_seconds = int(getattr(config, "pubmed_cache_ttl_seconds", 604800))
     negative_cache_ttl_seconds = int(
@@ -974,7 +999,7 @@ def _prepare_chat_context(
                 use_cache = True
 
         cached_pmids = _normalize_pmid_list((cache_payload or {}).get("pmids"))
-        if use_cache and len(cached_pmids) < requested_top_n:
+        if use_cache and len(cached_pmids) < candidate_fetch_k:
             use_cache = False
             _pipeline_log(
                 log_pipeline,
@@ -1012,10 +1037,13 @@ def _prepare_chat_context(
                 pubmed_query = rewrite_to_pubmed_query(query, llm)
             fetch_future: Future[tuple[list[str], list[str], list[dict[str, Any]], list[Any]]] = executor.submit(
                 _fetch_pubmed_records,
+                query,
                 pubmed_query,
                 candidate_fetch_k,
-                cache_store_retmax,
+                requested_top_n,
                 request_id,
+                llm,
+                bool(getattr(config, "multi_strategy_retrieval", True)),
             )
             search_pmids, fetched_pmids, records, documents = fetch_future.result()
             remember_query_result(
@@ -1082,6 +1110,7 @@ def _prepare_chat_context(
     retriever, reranker_active = _build_retriever(
         abstract_store=abstract_store,
         top_n=requested_top_n,
+        candidate_multiplier=retrieval_candidate_multiplier,
         use_reranker=bool(config.use_reranker),
         hybrid_retrieval=bool(config.hybrid_retrieval),
         hybrid_alpha=float(config.hybrid_alpha),
@@ -1130,16 +1159,30 @@ def _prepare_chat_context(
 
 
 def _fetch_pubmed_records(
+    user_query: str,
     pubmed_query: str,
     candidate_fetch_k: int,
-    search_retmax: int,
+    requested_top_n: int,
     request_id: str,
+    llm: Any | None,
+    multi_strategy_retrieval: bool,
 ) -> tuple[list[str], list[str], list[dict[str, Any]], list[Any]]:
     with start_span(
         "pubmed.retrieve",
         attributes={"request_id": request_id, "pubmed_query_hash": hash_query_text(pubmed_query)},
     ):
-        search_pmids = _normalize_pmid_list(pubmed_esearch(pubmed_query, retmax=search_retmax))
+        if multi_strategy_retrieval:
+            queries = build_multi_strategy_queries(user_query or pubmed_query, llm)
+            search_pmids = _normalize_pmid_list(
+                multi_strategy_esearch(queries, retmax_each=max(requested_top_n, 12))
+            )
+        else:
+            search_pmids = _normalize_pmid_list(
+                multi_strategy_esearch(
+                    [pubmed_query or user_query],
+                    retmax_each=max(requested_top_n, 12),
+                )
+            )
         fetched_pmids, records, documents = _fetch_records_for_pmids(
             search_pmids,
             target_count=candidate_fetch_k,
@@ -1438,7 +1481,38 @@ def _build_answer_cache_hit_payload(
     timing_payload["answer_cache_lookup_ms"] = round(lookup_ms, 3)
     timing_payload["total_ms"] = round(lookup_ms, 3)
     payload["timings"] = timing_payload
+    _apply_answer_metadata_to_payload(payload)
     return payload
+
+
+def _apply_answer_metadata_to_payload(payload: dict[str, Any]) -> None:
+    answer_text = str(payload.get("answer") or payload.get("message") or "").strip()
+    if not answer_text:
+        return
+    cleaned_answer, invalid_citations, evidence_quality = annotate_answer_metadata(
+        answer_text,
+        _source_pmids(payload.get("sources", []) or []),
+    )
+    if "answer" in payload:
+        payload["answer"] = cleaned_answer
+    elif "message" in payload:
+        payload["message"] = cleaned_answer
+    if invalid_citations:
+        payload["invalid_citations"] = invalid_citations
+    elif "invalid_citations" in payload:
+        payload.pop("invalid_citations", None)
+    if evidence_quality:
+        payload["evidence_quality"] = evidence_quality
+    elif "evidence_quality" in payload:
+        payload.pop("evidence_quality", None)
+
+
+def _source_pmids(sources: list[Mapping[str, Any]] | list[dict[str, Any]]) -> list[str]:
+    return [
+        str(item.get("pmid", "") or "").strip()
+        for item in sources or []
+        if str(item.get("pmid", "") or "").strip()
+    ]
 
 
 def _add_source_count_note(
@@ -1518,14 +1592,14 @@ def _build_retriever(
     *,
     abstract_store: Any,
     top_n: int,
+    candidate_multiplier: int,
     use_reranker: bool,
     hybrid_retrieval: bool,
     hybrid_alpha: float,
     log_pipeline: bool = False,
     reranker_resources: Any | None = None,
 ):
-    needs_expanded_candidates = bool(use_reranker or hybrid_retrieval)
-    candidate_k = min(50, max(top_n, (top_n * 3) if needs_expanded_candidates else top_n))
+    candidate_k = min(50, max(top_n, top_n * max(1, int(candidate_multiplier or 1))))
     retriever = _PipelineRetriever(
         abstract_store=abstract_store,
         candidate_k=candidate_k,

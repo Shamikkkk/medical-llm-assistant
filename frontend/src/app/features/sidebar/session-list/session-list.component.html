@@ -1,0 +1,28 @@
+<!-- Created by Codex - Section 2 -->
+
+<div class="session-list">
+  @for (session of sessions; track session.chat_id) {
+    <button
+      type="button"
+      class="session-card"
+      [class.active]="session.chat_id === activeSessionId"
+      (click)="sessionSelected.emit(session.chat_id)"
+    >
+      <div class="copy">
+        <strong>{{ session.title }}</strong>
+        <small>{{ session.branch_count }} branches</small>
+      </div>
+      <span class="actions">
+        <span class="badge mono">{{ session.branch_count }}</span>
+        <span
+          class="delete"
+          (click)="$event.stopPropagation(); sessionDeleted.emit(session.chat_id)"
+          role="button"
+          tabindex="0"
+        >
+          <lucide-angular [img]="trashIcon" size="14" />
+        </span>
+      </span>
+    </button>
+  }
+</div>

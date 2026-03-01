@@ -1,0 +1,18 @@
+<!-- Created by Codex - Section 2 -->
+
+<section class="composer glass-panel" @slideIn>
+  <p class="mono">Create an inline branch from this prompt</p>
+  <textarea
+    [ngModel]="draft()"
+    (ngModelChange)="draft.set($event)"
+    rows="5"
+  ></textarea>
+  <div class="actions">
+    <button type="button" class="primary" [disabled]="busy" (click)="createBranch.emit(draft())">
+      Create Branch
+    </button>
+    <button type="button" class="secondary" [disabled]="busy" (click)="cancel.emit()">
+      Cancel
+    </button>
+  </div>
+</section>
