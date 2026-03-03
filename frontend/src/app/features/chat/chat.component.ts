@@ -59,6 +59,13 @@ export class ChatComponent {
     });
   }
 
+  protected onKeyDown(event: KeyboardEvent): void {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      void this.submitQuery();
+    }
+  }
+
   protected async submitQuery(): Promise<void> {
     const query = this.draftQuery().trim();
     if (!query || this.isStreaming()) {
