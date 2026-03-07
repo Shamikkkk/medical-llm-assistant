@@ -21,6 +21,7 @@ export class SessionService {
   readonly followUpMode = signal<boolean>(this.readBoolean('followUpMode', true));
   readonly showPapers = signal<boolean>(this.readBoolean('showPapers', true));
   readonly computeDevice = signal<string>(this.readString('computeDevice', 'auto'));
+  readonly agentMode = signal<boolean>(this.readBoolean('agentMode', false));
   readonly lastResponseMs = signal<number | null>(null);
 
   readonly activeSession = computed(() =>
@@ -118,6 +119,11 @@ export class SessionService {
   setComputeDevice(value: string): void {
     this.computeDevice.set(value);
     this.writeSetting('computeDevice', value);
+  }
+
+  setAgentMode(value: boolean): void {
+    this.agentMode.set(value);
+    this.writeSetting('agentMode', String(value));
   }
 
   setLastResponseMs(value: number | null): void {

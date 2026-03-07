@@ -88,6 +88,18 @@
           />
         </label>
 
+        <label class="toggle-row agent-toggle" [class.agent-active]="sessionService.agentMode()">
+          <span class="with-icon">
+            <lucide-angular [img]="agentIcon" size="14" />
+            Agent mode
+          </span>
+          <input
+            type="checkbox"
+            [ngModel]="sessionService.agentMode()"
+            (ngModelChange)="sessionService.setAgentMode($event)"
+          />
+        </label>
+
         <label class="field">
           <span class="with-icon">
             <lucide-angular [img]="cpuIcon" size="14" />
@@ -114,20 +126,10 @@
           </button>
         </div>
 
-        <div class="cache-row">
-          <button type="button" class="ghost-button" disabled>
-            <lucide-angular [img]="cacheIcon" size="14" />
-            Query Cache
-          </button>
-          <button type="button" class="ghost-button" disabled>
-            <lucide-angular [img]="refreshIcon" size="14" />
-            Answer Cache
-          </button>
-          <button type="button" class="ghost-button" disabled>
-            <lucide-angular [img]="cacheIcon" size="14" />
-            Paper Cache
-          </button>
-        </div>
+        <button type="button" class="monitor-button" (click)="goToMonitor()">
+          <lucide-angular [img]="monitorIcon" size="15" />
+          Agent Monitor
+        </button>
       </section>
     </div>
   }

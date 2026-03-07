@@ -229,7 +229,7 @@ export class ChatComponent {
       session_id: sessionId,
       branch_id: branchId,
       top_n: this.sessionService.topN(),
-      agent_mode: false,
+      agent_mode: this.sessionService.agentMode(),
       follow_up_mode: this.sessionService.followUpMode(),
       chat_messages: history.map((message) => ({
         role: message.role,

@@ -2,14 +2,26 @@
 
 <section class="chat-page glass-panel">
   <header class="chat-header">
-    <div>
-      <p class="mono">Active branch</p>
-      <h2 class="display">
-        {{ sessionService.activeBranch()?.title || 'Main' }}
-      </h2>
-      <p class="context">
-        {{ sessionService.activeSession()?.title || 'New conversation' }}
-      </p>
+    <div class="header-main">
+      <div>
+        <p class="mono">Active branch</p>
+        <h2 class="display">
+          {{ sessionService.activeBranch()?.title || 'Main' }}
+        </h2>
+        <p class="context">
+          {{ sessionService.activeSession()?.title || 'New conversation' }}
+        </p>
+      </div>
+      <div class="header-badges">
+        @if (sessionService.agentMode()) {
+          <span class="mode-badge agent-badge">&#9679; Agent</span>
+        } @else {
+          <span class="mode-badge pipeline-badge">&#9632; Pipeline</span>
+        }
+        @if (sessionService.lastResponseMs()) {
+          <span class="mode-badge timing-badge">{{ sessionService.lastResponseMs() | number: '1.0-0' }} ms</span>
+        }
+      </div>
     </div>
   </header>
 
@@ -55,12 +67,22 @@
       placeholder="Ask about a condition, compare interventions, or continue the literature thread..."
       (keydown)="onKeyDown($event)"></textarea>
     <div class="composer-actions">
-      <p>
-        Streaming {{ sessionService.topN() }} papers ·
-        {{ sessionService.followUpMode() ? 'follow-up mode on' : 'follow-up mode off' }}
-      </p>
-      <button type="submit" [disabled]="isStreaming() || !draftQuery().trim()">
-        {{ isStreaming() ? 'Working...' : 'Send' }}
+      <div class="composer-meta">
+        <span class="meta-pill">{{ sessionService.topN() }} papers</span>
+        @if (sessionService.followUpMode()) {
+          <span class="meta-pill">follow-up</span>
+        }
+        @if (sessionService.agentMode()) {
+          <span class="meta-pill agent-pill">agent</span>
+        }
+      </div>
+      <button type="submit" class="send-btn" [disabled]="isStreaming() || !draftQuery().trim()" [class.sending]="isStreaming()">
+        @if (isStreaming()) {
+          <span class="btn-spinner"></span>
+          Working…
+        } @else {
+          Send
+        }
       </button>
     </div>
   </form>

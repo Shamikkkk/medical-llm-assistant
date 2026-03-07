@@ -1,0 +1,188 @@
+<section class="monitor-page glass-panel">
+  <header class="monitor-header">
+    <div>
+      <p class="mono">Agent Observability</p>
+      <h2 class="display">Monitoring Dashboard</h2>
+      <p class="subtitle">Real-time evaluation scores, latency metrics, and agent behaviour.</p>
+    </div>
+    @if (!loading() && !error()) {
+      <span class="live-badge">&#9679; Live · 30 s refresh</span>
+    }
+  </header>
+
+  @if (loading()) {
+    <div class="state-block">
+      <div class="spinner"></div>
+      <p class="mono">Loading monitoring data…</p>
+    </div>
+  } @else if (error()) {
+    <div class="state-block error">
+      <p>{{ error() }}</p>
+    </div>
+  } @else if (overview()) {
+    <!-- ── KPI Row ── -->
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <span class="kpi-value">{{ overview()!.metrics.total_requests | number }}</span>
+        <span class="kpi-label mono">Total Requests</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-value">{{ overview()!.metrics.latency_p50_ms | number: '1.0-0' }} ms</span>
+        <span class="kpi-label mono">p50 Latency</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-value">{{ overview()!.metrics.latency_p95_ms | number: '1.0-0' }} ms</span>
+        <span class="kpi-label mono">p95 Latency</span>
+      </div>
+      <div class="kpi-card" [class.kpi-good]="overview()!.metrics.cache_hit_rate > 0.3">
+        <span class="kpi-value">{{ overview()!.metrics.cache_hit_rate | percent: '1.0-1' }}</span>
+        <span class="kpi-label mono">Cache Hit Rate</span>
+      </div>
+      <div class="kpi-card" [class.kpi-bad]="overview()!.metrics.error_rate > 0.05">
+        <span class="kpi-value">{{ overview()!.metrics.error_rate | percent: '1.0-1' }}</span>
+        <span class="kpi-label mono">Error Rate</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-value">{{ overview()!.metrics.avg_pmid_count | number: '1.0-1' }}</span>
+        <span class="kpi-label mono">Avg PMIDs</span>
+      </div>
+    </div>
+
+    <!-- ── Mode Breakdown ── -->
+    <div class="two-col">
+      <div class="panel">
+        <h3 class="panel-title mono">Execution Mode</h3>
+        <div class="mode-bars">
+          @if (overview()!.metrics.total_requests > 0) {
+            <div class="mode-row">
+              <span>Pipeline</span>
+              <div class="bar-track">
+                <div
+                  class="bar-fill pipeline"
+                  [style.width]="scoreBarWidth(overview()!.pipeline_mode_count / overview()!.metrics.total_requests)"
+                ></div>
+              </div>
+              <span class="mono">{{ overview()!.pipeline_mode_count }}</span>
+            </div>
+            <div class="mode-row">
+              <span>Agent</span>
+              <div class="bar-track">
+                <div
+                  class="bar-fill agent"
+                  [style.width]="scoreBarWidth(overview()!.agent_mode_count / overview()!.metrics.total_requests)"
+                ></div>
+              </div>
+              <span class="mono">{{ overview()!.agent_mode_count }}</span>
+            </div>
+          } @else {
+            <p class="empty-note">No requests recorded yet.</p>
+          }
+        </div>
+      </div>
+
+      <!-- ── Step Latencies ── -->
+      <div class="panel">
+        <h3 class="panel-title mono">Avg Step Latencies (ms)</h3>
+        @if (stepEntries(overview()!.step_avg_latencies_ms).length) {
+          <div class="step-list">
+            @for (entry of stepEntries(overview()!.step_avg_latencies_ms); track entry.key) {
+              <div class="step-row">
+                <span class="step-name">{{ entry.key }}</span>
+                <div class="bar-track">
+                  <div
+                    class="bar-fill pipeline"
+                    [style.width]="scoreBarWidth(entry.value / (stepEntries(overview()!.step_avg_latencies_ms)[0].value || 1))"
+                  ></div>
+                </div>
+                <span class="mono step-val">{{ entry.value | number: '1.0-0' }}</span>
+              </div>
+            }
+          </div>
+        } @else {
+          <p class="empty-note">No timing data available yet.</p>
+        }
+      </div>
+    </div>
+
+    <!-- ── Eval Scores ── -->
+    <div class="panel full-width">
+      <h3 class="panel-title mono">Average Evaluation Scores (last 50 records)</h3>
+      @if (overview()!.total_eval_records > 0) {
+        <div class="score-grid">
+          @for (item of evalScoreLabels; track item.key) {
+            <div class="score-card" [class]="scoreClass(overview()!.avg_eval_scores[item.key])">
+              <div class="score-bar-wrap">
+                <div
+                  class="score-bar-fill"
+                  [style.height]="scoreBarWidth(overview()!.avg_eval_scores[item.key])"
+                ></div>
+              </div>
+              <span class="score-num">{{ overview()!.avg_eval_scores[item.key] | number: '1.2-2' }}</span>
+              <span class="score-label">{{ item.label }}</span>
+            </div>
+          }
+        </div>
+      } @else {
+        <p class="empty-note">No evaluation records yet. Enable <code>EVAL_MODE=true</code> to start collecting.</p>
+      }
+    </div>
+
+    <!-- ── Latency Sparkline ── -->
+    @if (latencySeries().length) {
+      <div class="panel full-width">
+        <h3 class="panel-title mono">Request Latency History (last {{ latencySeries().length }})</h3>
+        <div class="sparkline">
+          @for (pt of latencySeries(); track $index) {
+            <div
+              class="spark-bar"
+              [class.cache-hit]="pt.cache_hit"
+              [class.agent]="pt.agent_mode"
+              [style.height]="latencyBarHeight(pt, maxLatency)"
+              [title]="pt.total_ms + ' ms' + (pt.cache_hit ? ' (cached)' : '') + (pt.agent_mode ? ' [agent]' : '')"
+            ></div>
+          }
+        </div>
+        <div class="spark-legend">
+          <span class="legend-dot pipeline-dot"></span><span>Pipeline</span>
+          <span class="legend-dot agent-dot"></span><span>Agent</span>
+          <span class="legend-dot cache-dot"></span><span>Cache hit</span>
+        </div>
+      </div>
+    }
+
+    <!-- ── Recent Evals Table ── -->
+    @if (recentEvals().length) {
+      <div class="panel full-width">
+        <h3 class="panel-title mono">Recent Evaluation Records</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Query</th>
+                <th>Faithfulness</th>
+                <th>Relevance</th>
+                <th>Precision</th>
+                <th>Recall</th>
+                <th>Citation</th>
+                <th>Safety</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (rec of recentEvals(); track $index) {
+                <tr>
+                  <td class="query-cell" [title]="rec.query || ''">{{ (rec.query || '—') | slice: 0 : 60 }}…</td>
+                  <td [class]="scoreClass(rec.faithfulness ?? 0)">{{ rec.faithfulness != null ? (rec.faithfulness | number: '1.2-2') : '—' }}</td>
+                  <td [class]="scoreClass(rec.answer_relevance ?? 0)">{{ rec.answer_relevance != null ? (rec.answer_relevance | number: '1.2-2') : '—' }}</td>
+                  <td [class]="scoreClass(rec.context_precision ?? 0)">{{ rec.context_precision != null ? (rec.context_precision | number: '1.2-2') : '—' }}</td>
+                  <td [class]="scoreClass(rec.context_recall ?? 0)">{{ rec.context_recall != null ? (rec.context_recall | number: '1.2-2') : '—' }}</td>
+                  <td [class]="scoreClass(rec.citation_alignment ?? 0)">{{ rec.citation_alignment != null ? (rec.citation_alignment | number: '1.2-2') : '—' }}</td>
+                  <td [class]="scoreClass(rec.safety_compliance ?? 0)">{{ rec.safety_compliance != null ? (rec.safety_compliance | number: '1.2-2') : '—' }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    }
+  }
+</section>

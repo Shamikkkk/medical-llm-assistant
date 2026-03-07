@@ -1,5 +1,6 @@
 // Created by Codex - Section 2
 
+import { DecimalPipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
 import { LucideAngularModule, Pencil } from 'lucide-angular';
 
@@ -13,6 +14,7 @@ import { RelativeTimePipe } from '../../../shared/pipes/relative-time.pipe';
   selector: 'app-message-bubble',
   standalone: true,
   imports: [
+    DecimalPipe,
     LucideAngularModule,
     MarkdownPipe,
     RelativeTimePipe,
@@ -34,6 +36,11 @@ export class MessageBubbleComponent {
   @Output() editRequested = new EventEmitter<number>();
 
   protected readonly pencilIcon = Pencil;
+
+  protected get totalMs(): number | null {
+    const ms = this.message.timings?.['total_ms'];
+    return typeof ms === 'number' && ms > 0 ? ms : null;
+  }
 
   protected get evidenceTone(): string {
     switch ((this.message.evidence_quality || '').toLowerCase()) {

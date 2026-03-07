@@ -133,20 +133,43 @@ select {
   gap: 0.4rem;
 }
 
-.export-row,
-.cache-row {
+.export-row {
   display: grid;
   gap: 0.55rem;
 }
 
-.ghost-button {
-  justify-content: flex-start;
+.agent-toggle {
+  border-radius: 0.65rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
   background: transparent;
+  transition: background 150ms ease, border-color 150ms ease;
 }
 
-.ghost-button:disabled {
-  opacity: 0.48;
-  cursor: not-allowed;
+.agent-toggle.agent-active {
+  background: color-mix(in srgb, #7c6bff 12%, transparent);
+  border-color: color-mix(in srgb, #7c6bff 45%, transparent);
+  color: var(--text-primary);
+}
+
+.monitor-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  width: 100%;
+  min-height: 2.8rem;
+  border-radius: 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+}
+
+.monitor-button:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 @media (max-width: 1100px) {

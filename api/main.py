@@ -43,9 +43,7 @@ app.include_router(chat.router)
 app.include_router(config.router)
 app.include_router(papers.router)
 app.include_router(sessions.router)
-
-if get_config().eval_mode:
-    app.include_router(eval_router.router)
+app.include_router(eval_router.router)
 
 
 @app.get("/health")

@@ -5,6 +5,8 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@a
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import {
+  Activity,
+  Bot,
   Cpu,
   DatabaseZap,
   Download,
@@ -55,6 +57,8 @@ export class SidebarComponent {
   protected readonly cacheIcon = DatabaseZap;
   protected readonly refreshIcon = RefreshCw;
   protected readonly cpuIcon = Cpu;
+  protected readonly monitorIcon = Activity;
+  protected readonly agentIcon = Bot;
 
   protected async createChat(): Promise<void> {
     const created = await this.sessionService.createSession();
@@ -81,6 +85,10 @@ export class SidebarComponent {
       return;
     }
     await this.createChat();
+  }
+
+  protected async goToMonitor(): Promise<void> {
+    await this.router.navigate(['/monitor']);
   }
 
   protected download(kind: 'markdown' | 'json'): void {

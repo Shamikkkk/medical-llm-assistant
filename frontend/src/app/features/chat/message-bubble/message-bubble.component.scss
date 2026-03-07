@@ -88,6 +88,11 @@
   color: var(--text-muted);
 }
 
+.badge.timing {
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+
 .edit {
   border: 0;
   background: color-mix(in srgb, var(--bg-panel) 78%, transparent);
@@ -119,6 +124,34 @@
 
 .body :is(li, p) + :is(li, p) {
   margin-top: 0.45rem;
+}
+
+.validation-details {
+  border-radius: 0.65rem;
+  border: 1px solid color-mix(in srgb, #c97b00 40%, transparent);
+  background: color-mix(in srgb, #c97b00 6%, transparent);
+  overflow: hidden;
+}
+
+.validation-summary {
+  padding: 0.45rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: #c97b00;
+  font-family: 'JetBrains Mono', monospace;
+  user-select: none;
+
+  &:hover { background: color-mix(in srgb, #c97b00 10%, transparent); }
+}
+
+.validation-list {
+  margin: 0;
+  padding: 0.5rem 0.75rem 0.6rem 1.8rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+
+  li + li { margin-top: 0.25rem; }
 }
 
 .sources {

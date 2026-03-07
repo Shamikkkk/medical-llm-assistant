@@ -19,6 +19,9 @@
       @if (message.evidence_quality) {
         <span class="badge quality" [class]="evidenceTone">{{ message.evidence_quality }}</span>
       }
+      @if (totalMs) {
+        <span class="badge timing">{{ totalMs | number: '1.0-0' }} ms</span>
+      }
       @if (showEdit && message.role === 'user') {
         <button type="button" class="edit" (click)="editRequested.emit(messageIndex)">
           <lucide-angular [img]="pencilIcon" size="14" />
@@ -38,6 +41,19 @@
       <app-streaming-cursor />
     }
   </div>
+
+  @if (message.validation_issues?.length) {
+    <details class="validation-details">
+      <summary class="validation-summary">
+        &#9888; {{ message.validation_issues!.length }} validation issue{{ message.validation_issues!.length !== 1 ? 's' : '' }}
+      </summary>
+      <ul class="validation-list">
+        @for (issue of message.validation_issues!; track $index) {
+          <li>{{ issue }}</li>
+        }
+      </ul>
+    </details>
+  }
 
   @if (message.role === 'assistant' && showSources && message.sources?.length) {
     <div class="sources">

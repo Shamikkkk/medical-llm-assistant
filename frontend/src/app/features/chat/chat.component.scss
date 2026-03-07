@@ -14,6 +14,51 @@
   border-radius: 1.6rem;
 }
 
+.header-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.header-badges {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.4rem;
+}
+
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.agent-badge {
+  background: color-mix(in srgb, #7c6bff 14%, transparent);
+  color: #7c6bff;
+  border: 1px solid color-mix(in srgb, #7c6bff 40%, transparent);
+}
+
+.pipeline-badge {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.timing-badge {
+  background: color-mix(in srgb, var(--bg-panel) 80%, transparent);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
 .chat-header h2 {
   margin: 0.2rem 0 0;
   font-size: clamp(1.7rem, 2vw, 2.4rem);
@@ -68,22 +113,65 @@ textarea {
   flex-wrap: wrap;
 }
 
-.composer-actions p {
-  margin: 0;
-  color: var(--text-muted);
+.composer-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
 }
 
-.composer-actions button {
+.meta-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-family: 'JetBrains Mono', monospace;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.meta-pill.agent-pill {
+  background: color-mix(in srgb, #7c6bff 12%, transparent);
+  color: #7c6bff;
+  border-color: color-mix(in srgb, #7c6bff 35%, transparent);
+}
+
+.send-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
   min-height: 2.8rem;
-  padding: 0 1.1rem;
+  padding: 0 1.4rem;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
   background: color-mix(in srgb, var(--accent) 16%, transparent);
+  font-weight: 600;
+  transition: background 150ms ease;
 }
 
-.composer-actions button:disabled {
+.send-btn:not(:disabled):hover {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.send-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.btn-spinner {
+  display: inline-block;
+  width: 0.9rem;
+  height: 0.9rem;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 @media (max-width: 720px) {
