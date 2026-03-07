@@ -22,3 +22,8 @@ Thumbs.db
 # Logs
 *.log
 data/eval/*.jsonl
+data/chroma/
+data/sessions.json
+data/eval/
+data/metrics/
+data/papers/
